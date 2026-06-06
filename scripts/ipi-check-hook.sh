@@ -61,9 +61,8 @@ fi
 #    terminal, then extract the BLOCK / REVIEW_REQUIRED counters.
 cat "$STDERR_FILE" >&2
 
-SUMMARY="$(grep -E '^Scanned [0-9]+ files\.' "$STDERR_FILE" | tail -n 1 || true)"
-BLOCK_COUNT="$(printf '%s\n' "$SUMMARY" | sed -n 's/.*BLOCK: \([0-9][0-9]*\).*/\1/p')"
-REVIEW_COUNT="$(printf '%s\n' "$SUMMARY" | sed -n 's/.*REVIEW_REQUIRED: \([0-9][0-9]*\).*/\1/p')"
+BLOCK_COUNT="$(grep -E '^\s*BLOCK:' "$STDERR_FILE" | sed -n 's/.*BLOCK:[[:space:]]*\([0-9][0-9]*\).*/\1/p' | tail -n 1)"
+REVIEW_COUNT="$(grep -E '^\s*REVIEW_REQUIRED:' "$STDERR_FILE" | sed -n 's/.*REVIEW_REQUIRED:[[:space:]]*\([0-9][0-9]*\).*/\1/p' | tail -n 1)"
 BLOCK_COUNT="${BLOCK_COUNT:-0}"
 REVIEW_COUNT="${REVIEW_COUNT:-0}"
 

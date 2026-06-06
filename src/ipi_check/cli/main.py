@@ -267,11 +267,20 @@ def main() -> None:
     output_str: str | None = _expand_optional(args.output)
     quiet: bool = bool(args.quiet)
     no_gitignore: bool = bool(args.no_gitignore)
-    exclude_patterns: list[str] | None = args.exclude
+    exclude_patterns: list[str] | None = (
+        [expand_env_vars(p) for p in args.exclude] if args.exclude else None
+    )
 
     # Validate inputs.
     repo_path = _validate_repo_path(repo_path_str)
     output_path = _validate_output_path(output_str)
+
+    # Suppress Python warnings from ipi_check internals when --quiet is set,
+    # ensuring no non-SARIF output reaches stderr.
+    if quiet:
+        import warnings as _warnings  # noqa: PLC0415
+
+        _warnings.filterwarnings("ignore", module=r"ipi_check\..*")
 
     _print_banner(quiet)
 
@@ -291,6 +300,9 @@ def main() -> None:
             respect_gitignore=not no_gitignore,
             exclude_patterns=exclude_patterns,
         )
+    except (FileNotFoundError, NotADirectoryError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(EXIT_USAGE_ERROR)
     except Exception as exc:  # noqa: BLE001 — top-level CLI catch-all.
         print(_ERR_INTERNAL.format(message=exc), file=sys.stderr)
         sys.exit(EXIT_RUNTIME_ERROR)

@@ -174,7 +174,7 @@ CLASSIFIER_SYSTEM_PROMPT: str = (
 LLM_TEMPERATURE: float = 0.3
 LLM_REASONING_EFFORT: str = "min"  # "disabled" if supported, else "min"
 LLM_RESPONSE_FORMAT: str = "json_object"  # or {"type": "json_object"}
-LLM_TIMEOUT_SECONDS: int = 30
+LLM_TIMEOUT_SECONDS: int = 180
 # LLM_MAX_TOKENS removed — content is never truncated. Oversized files
 # are chunked instead. See edge cases above.
 ```

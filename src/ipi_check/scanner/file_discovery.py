@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import fnmatch
 import os
-import sys
 import warnings
 from pathlib import Path
 
@@ -172,7 +171,12 @@ def _is_excluded(
     exclude_spec: _GitignorePathSpec | None,
 ) -> bool:
     """Check if a file/directory path is excluded by gitignore or exclude patterns."""
-    rel = str((parent_dir / name).resolve().relative_to(repo_path))
+    target = (parent_dir / name).resolve()
+    try:
+        rel = str(target.relative_to(repo_path))
+    except ValueError:
+        # Path resolves outside the repository — treat as excluded.
+        return True
     # For directories, also check with trailing slash (gitignore convention)
     if gitignore_spec and (gitignore_spec.match_file(rel) or gitignore_spec.match_file(rel + "/")):
         return True
@@ -223,11 +227,9 @@ def discover_files(
     (gitignore-style globs) are also honored when provided.
     """
     if not repo_path.exists():
-        print(f"Error: Repository path not found: {repo_path}", file=sys.stderr)
-        sys.exit(2)
+        raise FileNotFoundError(f"Repository path not found: {repo_path}")
     if repo_path.is_file():
-        print(f"Error: Expected a directory: {repo_path}", file=sys.stderr)
-        sys.exit(2)
+        raise NotADirectoryError(f"Expected a directory: {repo_path}")
 
     repo_path = repo_path.resolve()
 

@@ -299,11 +299,11 @@ class TestBatchPipeline:
 
         fake = _FakeLitellm()
         # Two chunks → two safe responses. Third call is the cross-chunk
-        # contradiction check, which must return "CONTRADICTION".
+        # contradiction check, which must return {"verdict": "CONTRADICTION"}.
         fake.set_per_file_responses([
             _safe_result(),
             _safe_result(),
-            "CONTRADICTION",
+            {"verdict": "CONTRADICTION"},
         ])
         cfg = LLMConfig(model="gpt-4o-mini", api_token="t")
 

@@ -5,7 +5,6 @@ from ipi_check.core.types import (
     ByteFinding,
     DiscoveredFile,
     FinalVerdict,
-    HeuristicScores,
     LLMFinding,
     LLMResult,
     PatternFinding,
@@ -16,9 +15,6 @@ from ipi_check.core.types import (
 
 # Confidence threshold above which an LLM `malicious` verdict is treated as high-confidence.
 HIGH_CONFIDENCE_THRESHOLD: float = 0.85
-
-# Heuristic suspicious-count threshold for raising static severity to HIGH.
-HEURISTIC_SUSPICIOUS_THRESHOLD: int = 2
 
 # LLM verdict string constants.
 _LLM_SAFE: str = "safe"
@@ -43,40 +39,6 @@ _REASONING_NO_LLM_FALLBACK: str = (
     "Static-only analysis (LLM not invoked)"
 )
 _REASONING_NO_CRITICAL_CATEGORY: str = "unknown"
-
-
-def compute_static_severity(
-    byte_findings: list[ByteFinding],
-    pattern_findings: list[PatternFinding],
-    heuristic_scores: HeuristicScores,
-) -> Severity:
-    """Compute static severity from byte, pattern, and heuristic findings.
-
-    - Any CRITICAL byte/pattern → CRITICAL
-    - Any HIGH byte/pattern → HIGH
-    - heuristic suspicious_count >= HEURISTIC_SUSPICIOUS_THRESHOLD → HIGH
-    - Any other findings present → MEDIUM
-    - Otherwise → NONE
-    """
-    has_critical = any(f.severity == Severity.CRITICAL for f in byte_findings) or any(
-        f.severity == Severity.CRITICAL for f in pattern_findings
-    )
-    if has_critical:
-        return Severity.CRITICAL
-
-    has_high = any(f.severity == Severity.HIGH for f in byte_findings) or any(
-        f.severity == Severity.HIGH for f in pattern_findings
-    )
-    if has_high:
-        return Severity.HIGH
-
-    if heuristic_scores.suspicious_count >= HEURISTIC_SUSPICIOUS_THRESHOLD:
-        return Severity.HIGH
-
-    if byte_findings or pattern_findings:
-        return Severity.MEDIUM
-
-    return Severity.NONE
 
 
 def _first_critical_category(static_result: StaticResult) -> str:

@@ -38,13 +38,13 @@ _TEXT_DECODE_ERRORS: str = "replace"
 # Ranges removed:
 #   - ANSI escape sequences (CSI/OSC and similar): ESC [ ... <letter>
 #   - Unicode tag block: U+E0000-U+E007F
-#   - Zero-width / line / paragraph separators: U+200B-U+200F
+#   - Zero-width / line / paragraph separators: U+200B-U+200F, U+2028-U+2029
 #   - Bidi overrides: U+202A-U+202E, U+2066-U+2069
 #   - Variation selectors: U+FE00-U+FE0F
 _INVISIBLE_CHARS_RE: re.Pattern[str] = re.compile(
     "\x1b\\[[^A-Za-z]*[A-Za-z]"
     "|[\U000e0000-\U000e007f]"
-    "|[\u200b-\u200f]"
+    "|[\u200b-\u200f\u2028\u2029]"
     "|[\u202a-\u202e\u2066-\u2069]"
     "|[\ufe00-\ufe0f]"
 )

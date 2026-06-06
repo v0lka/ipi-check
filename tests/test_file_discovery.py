@@ -16,16 +16,14 @@ class TestDiscoverFiles:
         assert discover_files(tmp_path) == []
 
     def test_nonexistent_path_exits(self, tmp_path: Path) -> None:
-        with pytest.raises(SystemExit) as exc_info:
+        with pytest.raises(FileNotFoundError):
             discover_files(tmp_path / "nonexistent")
-        assert exc_info.value.code == 2
 
     def test_path_is_file_exits(self, tmp_path: Path) -> None:
         f = tmp_path / "x.md"
         f.write_text("hi")
-        with pytest.raises(SystemExit) as exc_info:
+        with pytest.raises(NotADirectoryError):
             discover_files(f)
-        assert exc_info.value.code == 2
 
     def test_agent_instruction_files_categorized(self, tmp_path: Path) -> None:
         (tmp_path / "AGENTS.md").write_text("a")

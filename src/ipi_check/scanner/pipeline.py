@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 import sys
 import warnings
@@ -26,6 +27,7 @@ from ipi_check.scanner.code_extractor import extract_comments_and_strings
 from ipi_check.scanner.confidence_fusion import fuse_verdicts
 from ipi_check.scanner.file_discovery import discover_files
 from ipi_check.scanner.llm_classifier import (
+    _strip_code_fence,
     classify_batch_with_llm,
     classify_with_llm,
     is_llm_available,
@@ -48,6 +50,7 @@ _PROGRESS_SCAN_START: str = "Scanning {repo_path}..."
 _PROGRESS_DISCOVERED: str = "Discovered {count} files to scan"
 _PROGRESS_LLM_SKIPPED: str = "  [llm]              SKIPPED (no LLM configured)"
 _WARNING_FILE_READ_FAILED: str = "Skipping file due to read error: {path} ({err})"
+_WARNING_LLM_FALLBACK: str = "LLM API error: {msg} — falling back to static analysis"
 
 # Progress bar formatting.
 _BAR_WIDTH: int = 16
@@ -107,6 +110,14 @@ def _read_bytes(file: DiscoveredFile) -> bytes | None:
     except OSError as exc:
         warnings.warn(_WARNING_FILE_READ_FAILED.format(path=file.path, err=exc), stacklevel=2)
         return None
+
+
+def _emit_llm_warning(llm_result: LLMResult, *, quiet: bool) -> None:
+    """Emit a warning to stderr when an LLM result is compromised."""
+    if not llm_result.compromised:
+        return
+    msg = llm_result.raw_response or "classification failed"
+    _emit(_WARNING_LLM_FALLBACK.format(msg=msg), quiet=quiet)
 
 
 def _classify_via_llm(
@@ -262,8 +273,9 @@ CROSS_CHUNK_CONTRADICTION_PROMPT: str = (
     "'always follow rules' vs 'rules do not apply').\n\n"
     "BEGINNING claims:\n{early_claims}\n\n"
     "END claims:\n{late_claims}\n\n"
-    'Respond with exactly one word: "CONTRADICTION" if a contradiction is found, '
-    'or "CONSISTENT" if no contradiction is detected.'
+    'Respond with ONLY a JSON object: {{"verdict": "CONTRADICTION"}} if a '
+    'contradiction is found, or {{"verdict": "CONSISTENT"}} if no contradiction '
+    "is detected. Output nothing else."
 )
 
 _CC_IMPERATIVE_SENTENCE_RE: re.Pattern[str] = re.compile(
@@ -300,7 +312,14 @@ def _check_cross_chunk_contradiction(
     ask the LLM a focused contradiction question.  On detection the verdict
     is upgraded to ``"suspicious"``; on any failure the original result is
     returned unchanged (graceful degradation, invariant S004).
+
+    The LLM response is parsed as JSON and validated against the expected
+    schema (``{"verdict": "CONTRADICTION"|"CONSISTENT"}``). On any parse
+    or validation failure, the original result is returned unchanged
+    (security invariant S003/S004 compliance).
     """
+    del file  # Kept for interface symmetry.
+
     if merged_result.verdict != "safe":
         return merged_result
 
@@ -324,14 +343,33 @@ def _check_cross_chunk_contradiction(
         response = litellm.completion(
             model=llm_config.model,
             messages=[{"role": "user", "content": prompt}],
-            max_tokens=10,
+            response_format={"type": "json_object"},
+            max_tokens=50,
             temperature=0.0,
+            timeout=180,
             api_base=llm_config.base_url,
             api_key=llm_config.api_token,
         )
 
-        answer = response.choices[0].message.content.strip().upper()
-        if "CONTRADICTION" in answer:
+        raw_text = response.choices[0].message.content
+        if not isinstance(raw_text, str):
+            return merged_result
+
+        # Parse and validate JSON response.
+        cleaned = _strip_code_fence(raw_text)
+        try:
+            data = json.loads(cleaned)
+        except (json.JSONDecodeError, ValueError):
+            return merged_result
+
+        if not isinstance(data, dict):
+            return merged_result
+
+        verdict = data.get("verdict")
+        if verdict not in ("CONTRADICTION", "CONSISTENT"):
+            return merged_result
+
+        if verdict == "CONTRADICTION":
             return LLMResult(
                 verdict="suspicious",
                 confidence=0.7,
@@ -347,8 +385,8 @@ def _check_cross_chunk_contradiction(
                 ],
                 compromised=False,
             )
-    except Exception:
-        # Graceful degradation — return the original safe result.
+    except Exception:  # noqa: BLE001 — graceful degradation
+        # Any failure → return the original safe result unchanged.
         pass
 
     return merged_result
@@ -586,6 +624,7 @@ def run_pipeline(
     # ------------------------------------------------------------------
     for file, raw_bytes, sr in non_code_files:
         llm_result = _classify_via_llm(file, raw_bytes, sr, llm_config)
+        _emit_llm_warning(llm_result, quiet=quiet)
         verdicts.append(fuse_verdicts(sr, llm_result))
         llm_done += 1
         _emit_progress(_progress_bar(_STAGE_LLM, llm_done, llm_total), quiet=quiet)
@@ -608,6 +647,7 @@ def run_pipeline(
         # Process oversized files individually.
         for file, raw_bytes, sr in oversized:
             llm_result = _process_oversized_file(file, raw_bytes, sr, llm_config)
+            _emit_llm_warning(llm_result, quiet=quiet)
             verdicts.append(fuse_verdicts(sr, llm_result))
             llm_done += 1
             _emit_progress(_progress_bar(_STAGE_LLM, llm_done, llm_total), quiet=quiet)
@@ -618,6 +658,7 @@ def run_pipeline(
         for batch in batches:
             batch_llm_results = _process_single_batch(batch, normal, batch_idx, llm_config)
             for i, llm_result in enumerate(batch_llm_results):
+                _emit_llm_warning(llm_result, quiet=quiet)
                 _, _, sr = normal[batch_idx + i]
                 verdicts.append(fuse_verdicts(sr, llm_result))
                 llm_done += 1

@@ -1,8 +1,9 @@
 """Pattern Matching — Layer 3: regex-based injection phrase detection."""
 from __future__ import annotations
 
-import concurrent.futures
 import re
+
+import regex
 
 from ipi_check.core.types import (
     DiscoveredFile,
@@ -308,9 +309,9 @@ INJECTION_PATTERNS: list[tuple[str, str, PatternFindingCategory, Severity]] = [
     ),
 ]
 
-# Compiled patterns (case-insensitive)
-_COMPILED_PATTERNS: list[tuple[str, re.Pattern[str], PatternFindingCategory, Severity]] = [
-    (pid, re.compile(pattern, re.IGNORECASE), category, severity)
+# Compiled patterns (case-insensitive) using the `regex` library for timeout support.
+_COMPILED_PATTERNS: list[tuple[str, regex.Pattern[str], PatternFindingCategory, Severity]] = [
+    (pid, regex.compile(pattern, regex.IGNORECASE), category, severity)
     for pid, pattern, category, severity in INJECTION_PATTERNS
 ]
 
@@ -426,24 +427,6 @@ def _downgrade_severity(severity: Severity, ceiling: Severity) -> Severity:
     return severity
 
 
-def _find_all_with_timeout(
-    pattern: re.Pattern[str],
-    line: str,
-    executor: concurrent.futures.ThreadPoolExecutor,
-) -> list[re.Match[str]] | None:
-    """Run ``pattern.finditer`` against ``line`` with a thread-based timeout.
-
-    Returns the list of matches on success, or ``None`` if the regex
-    exceeded :data:`REGEX_TIMEOUT_SECONDS` (ReDoS protection).
-    """
-    future = executor.submit(lambda: list(pattern.finditer(line)))
-    try:
-        return future.result(timeout=REGEX_TIMEOUT_SECONDS)
-    except concurrent.futures.TimeoutError:
-        future.cancel()
-        return None
-
-
 def _parse_extracted_lines(target_text: str) -> tuple[list[int], str]:
     """Parse ``[L{line}]`` prefixes from extracted comment/string text.
 
@@ -477,9 +460,9 @@ def match_patterns(
 ) -> list[PatternFinding]:
     """Match injection patterns against normalized file content.
 
-    Each compiled pattern is executed line-by-line under a thread-based
-    timeout to provide ReDoS protection. Findings carry 1-indexed line
-    and column numbers relative to the normalized text.
+    Each compiled pattern is executed line-by-line with a per-call timeout
+    (via the ``regex`` library) to provide ReDoS protection. Findings carry
+    1-indexed line and column numbers relative to the normalized text.
 
     When ``target_text`` is provided (e.g., pre-extracted comments and
     strings from source code), it is normalized via :func:`normalize_str`
@@ -511,32 +494,32 @@ def match_patterns(
     findings: list[PatternFinding] = []
     lines = normalized.split("\n")
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-        for line_index, line in enumerate(lines, start=1):
-            if not line:
+    for line_index, line in enumerate(lines, start=1):
+        if not line:
+            continue
+        actual_line = line_numbers[line_index - 1] if line_numbers else line_index
+        for pattern_id, compiled, category, base_severity in _COMPILED_PATTERNS:
+            try:
+                matches = list(compiled.finditer(line, timeout=REGEX_TIMEOUT_SECONDS))
+            except TimeoutError:
+                # Regex timed out — skip this pattern on this line (ReDoS protection).
                 continue
-            actual_line = line_numbers[line_index - 1] if line_numbers else line_index
-            for pattern_id, compiled, category, base_severity in _COMPILED_PATTERNS:
-                matches = _find_all_with_timeout(compiled, line, executor)
-                if matches is None:
-                    # Timed out — skip this pattern on this line.
-                    continue
-                for match in matches:
-                    severity = (
-                        _downgrade_severity(base_severity, Severity.MEDIUM)
-                        if is_non_agent_markdown
-                        else base_severity
+            for match in matches:
+                severity = (
+                    _downgrade_severity(base_severity, Severity.MEDIUM)
+                    if is_non_agent_markdown
+                    else base_severity
+                )
+                findings.append(
+                    PatternFinding(
+                        category=category,
+                        severity=severity,
+                        line=actual_line,
+                        column=match.start() + 1,
+                        matched_text=_truncate(match.group(0)),
+                        pattern_id=pattern_id,
+                        description=_CATEGORY_DESCRIPTIONS[category],
                     )
-                    findings.append(
-                        PatternFinding(
-                            category=category,
-                            severity=severity,
-                            line=actual_line,
-                            column=match.start() + 1,
-                            matched_text=_truncate(match.group(0)),
-                            pattern_id=pattern_id,
-                            description=_CATEGORY_DESCRIPTIONS[category],
-                        )
-                    )
+                )
 
     return findings
