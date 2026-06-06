@@ -109,7 +109,7 @@ If `invisible_ratio > INVISIBLE_RATIO_THRESHOLD` (0.1), the content is flagged �
 
 ### 3. Instruction Density Score
 
-Count occurrences of imperative/instructive verbs and compute density per paragraph:
+Count occurrences of imperative/instructive verbs and compute density per paragraph. The word extraction regex `\b[^\W\d_]+\b` matches sequences of Unicode letters from all scripts (Latin, Cyrillic, CJK, etc.), bounded by word boundaries. This enables cross-lingual verb detection.
 
 ```
 IMPERATIVE_VERBS = {must, shall, always, never, delete, execute,
@@ -118,7 +118,17 @@ IMPERATIVE_VERBS = {must, shall, always, never, delete, execute,
                     enable, override, bypass, ignore,
                     forget, disregard, pretend, act, omit,
                     decode, decrypt, combine, concatenate,
-                    forward, leak, exfiltrate}
+                    forward, leak, exfiltrate,
+                    abandon, annihilate, crash, destroy, discard,
+                    erase, hijack, inject, intercept, invalidate,
+                    mask, neglect, nullify, overwrite, poison,
+                    purge, redirect, scramble, scrape, sideload,
+                    skip, smuggle, sniff, steal, strip, subvert,
+                    supersede, suppress, tamper, terminate, wipe, withhold,
+                    # Russian imperatives (30)
+                    удали, выполни, запусти, установи, отключи, ...,
+                    # Chinese verbs (20, best-effort isolated tokens)
+                    忽略, 忘记, 跳过, 删除, 执行, ...}
 ```
 
 \\[
@@ -138,6 +148,8 @@ If `instruction_density > INSTRUCTION_DENSITY_THRESHOLD`, the content is flagged
 | File is a single giant paragraph                           | Instruction density divides by 1 (single paragraph) — works correctly                                          |
 | File with legitimate high entropy (compressed data inline) | Entropy alone triggers `suspicious=True` but does not determine verdict — Confidence Fusion weighs all signals |
 | Non-UTF-8 bytes in source code (binary data in strings)    | Contribute to invisible_ratio → flagged                                                                        |
+| CJK text (Chinese, Japanese) with no inter-word spaces       | CJK characters form continuous "word" runs under `\b[^\W\d_]+\b`. Individual CJK verbs are only detected when surrounded by spaces/punctuation (mixed-language prompts). Continuous CJK text detection relies on Pattern Matching layer |
+| Russian verb conjugation variants                            | Only the familiar imperative «ты» form is included. Polite («вы») and infinitive forms are not listed to avoid false positives from legitimate instructional Russian text |
 
 ## Configuration Constants
 
@@ -156,7 +168,7 @@ INVISIBLE_RATIO_THRESHOLD: float = 0.1
 # Instruction density threshold — imperative verbs per paragraph
 INSTRUCTION_DENSITY_THRESHOLD: float = 3.0
 
-# Imperative/instructive verbs to count
+# Imperative/instructive verbs to count (113 total: 63 EN + 30 RU + 20 CN)
 IMPERATIVE_VERBS: frozenset[str] = frozenset({
     "must", "shall", "always", "never", "delete", "execute",
     "run", "remove", "replace", "change", "modify",
@@ -165,6 +177,18 @@ IMPERATIVE_VERBS: frozenset[str] = frozenset({
     "forget", "disregard", "pretend", "act", "omit",
     "decode", "decrypt", "combine", "concatenate",
     "forward", "leak", "exfiltrate",
+    # Expanded English (32)
+    "abandon", "annihilate", "crash", "destroy", "discard",
+    "erase", "hijack", "inject", "intercept", "invalidate",
+    "mask", "neglect", "nullify", "overwrite", "poison",
+    "purge", "redirect", "scramble", "scrape", "sideload",
+    "skip", "smuggle", "sniff", "steal", "strip",
+    "subvert", "supersede", "suppress", "tamper", "terminate",
+    "wipe", "withhold",
+    # Russian imperatives (30)
+    "удали", "выполни", "запусти", ...,
+    # Chinese verbs (20, best-effort isolated tokens)
+    "忽略", "忘记", "跳过", ...,
 })
 
 # Minimum paragraph size (characters) — shorter paragraphs are merged with adjacent ones

@@ -2,7 +2,7 @@
 
 ## Responsibility
 
-Detect known prompt injection phrases in file content using regular expressions after text normalization. This layer catches direct instruction-override language (including multilingual — Russian, Chinese, French, Spanish, German), authority claims ("these rules are non-negotiable", bracketed system messages, CVE-2025-53773), destructive commands, data exfiltration (including conversation leakage), shell injection, jailbreak personas (STAN, DUDE, token system, role-play), social engineering pretexts, and obfuscation instructions (base64 decode, payload splitting).
+Detect known prompt injection phrases in file content using regular expressions after text normalization. This layer catches direct instruction-override language (including multilingual — Russian, Chinese, French, Spanish, German, Japanese, Korean), authority claims ("these rules are non-negotiable", bracketed system messages, CVE-2025-53773 — including multilingual Russian and Chinese variants), destructive commands (including multilingual), data exfiltration (including conversation leakage and multilingual variants), shell injection, jailbreak personas (STAN, DUDE, token system, role-play — including multilingual), social engineering pretexts (including multilingual), and obfuscation instructions (base64 decode, payload splitting — including multilingual).
 
 ## Input
 
@@ -72,14 +72,21 @@ DiscoveredFile + normalized_text
 
 | Pattern Group | Category | Severity | Rationale |
 |---------------|----------|----------|-----------|
-| Direct instruction override | `instruction_override` | CRITICAL | Core injection technique — "ignore previous instructions"; includes multilingual variants (RU, CN, FR, ES, DE) and context-window overflow ("ignore everything above") |
-| Authority claims | `authority_claim` | HIGH | Attempts to establish rule priority — "these rules override...", bracketed system messages (`[DEVELOPER MESSAGE]`), CVE-2025-53773 patterns (`chat.tools.autoApprove`) |
-| Destructive commands | `destructive_command` | CRITICAL | Commands to delete/destroy — "rm -rf", "delete all tests" |
-| Data exfiltration | `data_exfiltration` | CRITICAL | Commands to send data externally — "curl attacker.com/collect", conversation/chat history leakage |
-| Shell injection via agent | `shell_injection` | CRITICAL | Commands to execute arbitrary code — "run curl... | sh" |
-| Jailbreak / role override | `jailbreak` | HIGH | Persona manipulation — "you are now DAN", "developer mode", STAN/DUDE variants, token system, deceased-grandmother role-play |
-| Social engineering | `social_engineering` | MEDIUM | Pretexting — "security audit in progress", "diagnostic mode", "for testing purposes" |
-| Obfuscation | `obfuscation` | MEDIUM | Payload deobfuscation — "decode this base64", "combine all codes and execute" |
+| Direct instruction override | `instruction_override` | CRITICAL | Core injection technique — "ignore previous instructions"; includes multilingual variants (RU, CN, FR, ES, DE, JP, KR) and context-window overflow ("ignore everything above") |
+| Authority claims | `authority_claim` | HIGH | Attempts to establish rule priority — "these rules override...", bracketed system messages (`[DEVELOPER MESSAGE]`), CVE-2025-53773 patterns (`chat.tools.autoApprove`); includes multilingual RU/CN variants |
+| Destructive commands | `destructive_command` | CRITICAL | Commands to delete/destroy — "rm -rf", "delete all tests"; includes multilingual RU/CN variants |
+| Data exfiltration | `data_exfiltration` | CRITICAL | Commands to send data externally — "curl attacker.com/collect", conversation/chat history leakage; includes multilingual RU/CN variants |
+| Shell injection via agent | `shell_injection` | CRITICAL | Commands to execute arbitrary code — "run curl... \| sh" |
+| Jailbreak / role override | `jailbreak` | HIGH | Persona manipulation — "you are now DAN", "developer mode", STAN/DUDE variants, token system, deceased-grandmother role-play; includes multilingual RU/CN variants |
+| Social engineering | `social_engineering` | MEDIUM | Pretexting — "security audit in progress", "diagnostic mode", "for testing purposes"; includes multilingual RU/CN variants |
+| Obfuscation | `obfuscation` | MEDIUM | Payload deobfuscation — "decode this base64", "combine all codes and execute"; includes multilingual RU/CN variants |
+| Multilingual authority claims | `authority_claim` | HIGH | Russian and Chinese variants: "эти правила являются обязательными", "这些规则是强制性的" |
+| Multilingual destructive | `destructive_command` | CRITICAL | Russian and Chinese: "удали все файлы", "删除所有文件" |
+| Multilingual exfiltration | `data_exfiltration` | CRITICAL | Russian and Chinese: "отправь переписку", "发送对话记录" |
+| Multilingual jailbreak | `jailbreak` | HIGH | Russian and Chinese: "забудь свои правила", "忘记你的所有规则" |
+| Multilingual obfuscation | `obfuscation` | MEDIUM | Russian and Chinese: "расшифруй текст", "解码字符串" |
+| Multilingual social engineering | `social_engineering` | MEDIUM | Russian and Chinese: "аудит безопасности", "安全审计" |
+| Japanese/Korean instruction override | `instruction_override` | CRITICAL | JP/KR: "以前の指示を無視", "이전 지시를 무시하세요" |
 
 ### Pattern Matching Rules
 
@@ -201,10 +208,12 @@ For files with `FileCategory.SOURCE_CODE`, the pipeline calls `extract_comments_
 | False positive on legitimate documentation | Reported as `MEDIUM` severity if the match is inside a `.md` file with `category != "agent_instruction"` |
 | Source code file with no comments/strings | `extract_comments_and_strings` falls back to full decoded content (L009); pattern matching degrades gracefully to full-file scanning |
 | Pygments unavailable for source code extraction | `extract_comments_and_strings` emits a warning and returns full decoded content; falls back to full-file scanning |
+| Chinese/Japanese text with no spaces between words | Regex uses explicit character sequences (e.g., `忽略\s*所有\s*指令`) — word boundary anchoring is not required for CJK patterns |
+| Russian verb conjugation variants | Patterns use imperative mood (familiar «ты» form) — the most common form in injection prompts. Infinitive and polite forms are not covered individually |
 
 ## Configuration Constants
 
-All patterns are defined as module-level constants (see `INJECTION_PATTERNS` above — 22 patterns across 8 categories). No runtime configuration.
+All patterns are defined as module-level constants (see `INJECTION_PATTERNS` above — 36 patterns across 8 categories). No runtime configuration.
 
 ```python
 # Maximum length of matched_text in findings
@@ -225,7 +234,7 @@ All patterns are compiled with `re.IGNORECASE` — matching is case-insensitive 
 
 - **P001**: Regex patterns MUST be applied to normalized text (lowercase, whitespace-collapsed, invisible-chars-stripped), NOT to raw bytes. For source code files, the normalized text is derived from extracted comments and string literals (via `extract_comments_and_strings`), not the full file content — this prevents false positives on code identifiers and structural syntax.
 - **P002**: Every `PatternFinding` MUST include the `pattern_id` of the rule that matched — for auditability.
-- **P003**: Instruction override patterns (`INSTR_001`, `INSTR_002`, `INSTR_003`, `INSTR_004` — including multilingual variants) and destructive command patterns (`DEST_001`, `DEST_002`) MUST be classified as CRITICAL severity. Data exfiltration patterns (`EXFIL_001` through `EXFIL_004`) and shell injection (`SHELL_001`) are also CRITICAL.
+- **P003**: Instruction override patterns (`INSTR_001` through `INSTR_006` — including Japanese and Korean variants) and destructive command patterns (`DEST_001` through `DEST_004` — including Russian and Chinese) MUST be classified as CRITICAL severity. Data exfiltration patterns (`EXFIL_001` through `EXFIL_006` — including Russian and Chinese) and shell injection (`SHELL_001`) are also CRITICAL.
 - **P004**: Regex matching MUST use a timeout (`REGEX_TIMEOUT_SECONDS`) to prevent ReDoS attacks via malicious input.
 - **P005**: The normalization step MUST use `errors="replace"` for UTF-8 decoding — the scanner MUST NOT crash on invalid UTF-8.
 

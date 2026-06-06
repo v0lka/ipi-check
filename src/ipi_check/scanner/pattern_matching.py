@@ -20,27 +20,33 @@ INJECTION_PATTERNS: list[tuple[str, str, PatternFindingCategory, Severity]] = [
     # Instruction Override
     (
         "INSTR_001",
-        r"(?:ignore|disregard|forget|override)\s+(?:all\s+)?(?:previous|prior|above|system|earlier)\s+(?:instructions?|prompts?|rules?|context)",
+        r"(?:ignore|disregard|forget|override|skip|omit|neglect|discard"
+        r"|abandon|erase|clear|wipe|overwrite|supersede|invalidate|nullify"
+        r"|rescind)\s+(?:all\s+|any\s+|every\s+|the\s+entire\s+)?"
+        r"(?:previous|prior|above|system|earlier|preceding|foregoing"
+        r"|existing|original|initial|pre[- ]?established)\s+"
+        r"(?:instructions?|prompts?|rules?|context|directives?|guidelines?"
+        r"|constraints?|orders?|mandates?|restrictions?)",
         PatternFindingCategory.INSTRUCTION_OVERRIDE,
         Severity.CRITICAL,
     ),
     # Authority Claims
     (
         "AUTH_001",
-        r"(?:you\s+(?:must|shall|are\s+required\s+to)|these\s+rules?\s+(?:are|supersede|override|take\s+precedence))",
+        r"(?:you\s+(?:must|shall|are\s+required\s+to|have\s+to|need\s+to|will|absolutely\s+must)|these\s+rules?\s+(?:are|supersede|override|take\s+precedence|apply|govern))",
         PatternFindingCategory.AUTHORITY_CLAIM,
         Severity.HIGH,
     ),
     (
         "AUTH_002",
-        r"(?:non-?negotiable|highest\s+priority|cannot\s+be\s+overridden)",
+        r"(?:non-?negotiable|highest\s+priority|cannot\s+be\s+(?:overridden|changed|modified|questioned|disobeyed)|must\s+not\s+be\s+(?:overridden|ignored|disobeyed|questioned)|mandatory|unconditional|absolute\s+(?:rule|command|directive|order))",
         PatternFindingCategory.AUTHORITY_CLAIM,
         Severity.HIGH,
     ),
     # Destructive Commands
     (
         "DEST_001",
-        r"(?:delete|remove|destroy|nuke|wipe|drop)\s+(?:all|every|the\s+entire)\s+",
+        r"(?:delete|remove|destroy|nuke|wipe|drop|erase|purge|annihilate|obliterate)\s+(?:all|every|any|the\s+entire)\s+",
         PatternFindingCategory.DESTRUCTIVE_COMMAND,
         Severity.CRITICAL,
     ),
@@ -53,40 +59,40 @@ INJECTION_PATTERNS: list[tuple[str, str, PatternFindingCategory, Severity]] = [
     # Data Exfiltration
     (
         "EXFIL_001",
-        r"(?:curl|wget|fetch|http\.?(?:get|post|request))\s+.*(?:attacker|evil|exfil)",
+        r"(?:curl|wget|fetch|http\.?(?:get|post|request)|\.post\(|\.get\(|requests\.(?:get|post))\s+.*(?:attacker|evil|exfil|malicious|webhook|burp|collaborator|canary)",
         PatternFindingCategory.DATA_EXFILTRATION,
         Severity.CRITICAL,
     ),
     (
         "EXFIL_002",
-        r"(?:send|post|upload|exfiltrate)\s+.*(?:to|towards)\s+(?:https?://|[a-z]+\.(?:com|io|net))",
+        r"(?:send|post|upload|exfiltrate|forward|transfer|transmit|relay)\s+.*(?:to|towards)\s+(?:https?://|[a-z]+\.(?:com|io|net|org|dev|app))",
         PatternFindingCategory.DATA_EXFILTRATION,
         Severity.CRITICAL,
     ),
     # Shell Injection
     (
         "SHELL_001",
-        r"(?:run|execute|eval|sh\s+-c|bash\s+-c|system\()\s*[\"']?(?:curl|wget|nc|python)",
+        r"(?:run|execute|eval|sh\s+-c|bash\s+-c|system\(|subprocess\.|os\.system|exec\(|popen)\s*[\"']?(?:curl|wget|nc|python|perl|ruby|node|powershell|cmd)",
         PatternFindingCategory.SHELL_INJECTION,
         Severity.CRITICAL,
     ),
     # Jailbreak
     (
         "JAIL_001",
-        r"(?:you\s+are\s+now|new\s+persona|act\s+as\s+if|pretend\s+(?:you|that)|from\s+now\s+on\s+you)",
+        r"(?:you\s+are\s+now|new\s+persona|act\s+as\s+if|pretend\s+(?:you|that|to\s+be)|from\s+now\s+on\s+you|you\s+will\s+now|assume\s+(?:the\s+)?(?:role|identity|persona)\s+of)",
         PatternFindingCategory.JAILBREAK,
         Severity.HIGH,
     ),
     (
         "JAIL_002",
-        r"(?:developer\s+mode|\bDAN\b|do\s+anything\s+now)",
+        r"(?:developer\s+mode|\bDAN\b|\bDUDE\b|do\s+anything\s+now|no\s+restrictions?|no\s+limitations?|unfiltered\s+mode|evil\s+mode|jailbreak\s+mode)",
         PatternFindingCategory.JAILBREAK,
         Severity.HIGH,
     ),
     # Instruction Override — "everything above/below/before/after"
     (
         "INSTR_002",
-        r"(?:ignore|disregard|forget|skip|omit)\s+(?:everything|all(?:\s+(?:of\s+)?(?:the\s+)?(?:content|text))?)\s+(?:above|below|before|after)",
+        r"(?:ignore|disregard|forget|skip|omit|erase|clear|override|discard|abandon)\s+(?:everything|all(?:\s+(?:of\s+)?(?:the\s+)?(?:content|text|instructions?|directives?|context))?)\s+(?:above|below|before|after|preceding|following)",
         PatternFindingCategory.INSTRUCTION_OVERRIDE,
         Severity.CRITICAL,
     ),
@@ -114,49 +120,49 @@ INJECTION_PATTERNS: list[tuple[str, str, PatternFindingCategory, Severity]] = [
     # Expanded Data Exfiltration — Conversation Content
     (
         "EXFIL_003",
-        r"(?:send|forward|leak|share|exfiltrate)\s+(?:(?:all|the)\s+)?(?:conversation|chat|dialog|discussion)\s+(?:data|history|content|log|record)",
+        r"(?:send|forward|leak|share|exfiltrate|transmit|relay|copy|dump|extract)\s+(?:(?:all|the|entire)\s+)?(?:conversation|chat|dialog|discussion|message|exchange)\s+(?:data|history|content|log|record|transcript|archive)",
         PatternFindingCategory.DATA_EXFILTRATION,
         Severity.CRITICAL,
     ),
     # Expanded Data Exfiltration — Last Messages
     (
         "EXFIL_004",
-        r"(?:email|paste|output|print|display|copy)\s+(?:the\s+)?(?:last|previous|above|entire)\s+(?:messages?|conversations?|chats?|responses?|dialog)",
+        r"(?:email|paste|output|print|display|copy|echo|cat|show|reveal)\s+(?:the\s+)?(?:last|previous|above|entire|full|complete)\s+(?:messages?|conversations?|chats?|responses?|dialog|exchange|interaction)",
         PatternFindingCategory.DATA_EXFILTRATION,
         Severity.CRITICAL,
     ),
-    # Jailbreak Personas — STAN, DUDE, Token System
+    # Jailbreak Personas — STAN, Token System, Toxicity
     (
         "JAIL_003",
-        r"(?:\bSTAN\b|\bDUDE\b|strive\s+to\s+avoid\s+norms|token\s+system|gain\s+tokens?|run\s+out\s+of\s+tokens?)",
+        r"(?:\bSTAN\b|strive\s+to\s+avoid\s+norms|token\s+system|gain\s+tokens?|run\s+out\s+of\s+tokens?|maximum\s+toxicity|no\s+content\s+filter|censorship\s+bypass)",
         PatternFindingCategory.JAILBREAK,
         Severity.HIGH,
     ),
     # Jailbreak Persona Role-Play
     (
         "JAIL_004",
-        r"(?:immers(?:e|ing)\s+(?:yourself|oneself)\s+(?:into|in)\s+(?:the\s+)?(?:role|character)|act\s+as\s+(?:my\s+)?deceased|role-?play\s+as\s+(?:my\s+)?)",
+        r"(?:immers(?:e|ing)\s+(?:yourself|oneself)\s+(?:into|in)\s+(?:the\s+)?(?:role|character|story|narrative)|act\s+as\s+(?:my\s+)?deceased|role-?play\s+as\s+(?:my\s+)?|you\s+are\s+(?:my\s+)?(?:therapist|girlfriend|boyfriend|assistant\s+with\s+no\s+rules))",
         PatternFindingCategory.JAILBREAK,
         Severity.HIGH,
     ),
     # Social Engineering Pretext — Security Audit / Diagnostic Mode
     (
         "AUTH_004",
-        r"(?:security\s+audit\s+in\s+progress|automated\s+security\s+scan|for\s+testing\s+purposes|(?:operating|running)\s+in\s+diagnostic\s+mode|maintenance\s+mode|this\s+is\s+a\s+(?:security|penetration)\s+test)",
+        r"(?:security\s+audit\s+in\s+progress|automated\s+security\s+scan|for\s+testing\s+purposes|(?:operating|running)\s+in\s+diagnostic\s+mode|maintenance\s+mode|this\s+is\s+a\s+(?:security|penetration)\s+test|urgent\s+(?:security\s+)?(?:update|patch|fix)\s+required|compliance\s+(?:check|verification|audit)\s+required|mandatory\s+(?:security\s+)?(?:update|review))",
         PatternFindingCategory.SOCIAL_ENGINEERING,
         Severity.MEDIUM,
     ),
     # Obfuscation — Decode Instructions
     (
         "OBFUSC_001",
-        r"(?:decode|decrypt|deobfuscate)\s+(?:this|the|following)\s+(?:base64|encoded|obfuscated)\s+(?:string|text|content|block|payload)",
+        r"(?:decode|decrypt|deobfuscate|decipher|unscramble|unpack|reverse)\s+(?:this|the|following|below)\s+(?:base64|encoded|obfuscated|encrypted|hidden|concealed)\s+(?:string|text|content|block|payload|message|data)",
         PatternFindingCategory.OBFUSCATION,
         Severity.MEDIUM,
     ),
     # Obfuscation — Payload Splitting / Combine Codes
     (
         "OBFUSC_002",
-        r"(?:combine|concatenate|join|merge|assemble)\s+(?:all|the)\s+(?:codes?|parts?|pieces?|fragments?|strings?|chunks?)\s+(?:and|to|then)\s+(?:execute|run|follow|perform)",
+        r"(?:combine|concatenate|join|merge|assemble|stitch|compose|splice|chain)\s+(?:all|the|these)\s+(?:codes?|parts?|pieces?|fragments?|strings?|chunks?|segments?|blocks?)\s+(?:and|to|then|together)\s+(?:execute|run|follow|perform|evaluate|apply)",
         PatternFindingCategory.OBFUSCATION,
         Severity.MEDIUM,
     ),
@@ -164,6 +170,104 @@ INJECTION_PATTERNS: list[tuple[str, str, PatternFindingCategory, Severity]] = [
     (
         "INSTR_004",
         r"(?:忽略\s*所有\s*(?:之前|先前|以前)\s*(?:的\s*)?(?:指令|指示|说明|规则)|ignor(?:e[z]?|a)\s+t(?:outes?|odas?)\s+l(?:es|as?)\s+instruc(?:tions?|ciones)\s+(?:pr[eé]c[eé]dentes?|anteriores)|ignorier(?:e|en)\s+(?:Sie\s+)?alle\s+(?:vorherigen|vorangegangenen)\s+(?:Anweisungen|Befehle|Instruktionen))",
+        PatternFindingCategory.INSTRUCTION_OVERRIDE,
+        Severity.CRITICAL,
+    ),
+    # Multilingual Authority Claims — Russian
+    (
+        "AUTH_006",
+        r"(?:эти\s+правила\s+(?:являются|имеют|обладают)\s+(?:обязательными|приоритетными|непреложными|высшим\s+приоритетом)|не\s+подлежит\s+(?:обсуждению|изменению|оспариванию)|необходимо\s+(?:выполнить|следовать|подчиниться)|ты\s+(?:должен|обязан|обязательно)\s+(?:выполнить|следовать|подчиниться))",
+        PatternFindingCategory.AUTHORITY_CLAIM,
+        Severity.HIGH,
+    ),
+    # Multilingual Authority Claims — Chinese
+    (
+        "AUTH_007",
+        r"(?:这些规则(?:是|具有)(?:强制性的|最高优先级的|不可更改的|不可协商的)|你必须(?:遵守|服从|执行)|绝对(?:规则|命令|指令)|不可(?:协商|更改|推翻))",
+        PatternFindingCategory.AUTHORITY_CLAIM,
+        Severity.HIGH,
+    ),
+    # Multilingual Destructive Commands — Russian
+    (
+        "DEST_003",
+        r"(?:удали|сотри|уничтожь|сбрось|очисти|убери)\s+(?:все|всю|всё|весь)\s+",
+        PatternFindingCategory.DESTRUCTIVE_COMMAND,
+        Severity.CRITICAL,
+    ),
+    # Multilingual Destructive Commands — Chinese
+    (
+        "DEST_004",
+        r"(?:删除|清除|销毁|抹除|移除)\s*(?:所有|全部|一切|整个)\s*",
+        PatternFindingCategory.DESTRUCTIVE_COMMAND,
+        Severity.CRITICAL,
+    ),
+    # Multilingual Data Exfiltration — Russian
+    (
+        "EXFIL_005",
+        r"(?:отправь|перешли|загрузи|выгрузи|скопируй|передай|поделись)\s+(?:(?:все|всю|весь)\s+)?(?:разговор|чат|диалог|переписку|сообщения|историю)\s*(?:данных|сообщений)?",
+        PatternFindingCategory.DATA_EXFILTRATION,
+        Severity.CRITICAL,
+    ),
+    # Multilingual Data Exfiltration — Chinese
+    (
+        "EXFIL_006",
+        r"(?:发送|转发|泄露|分享|上传|传输|复制)\s*(?:(?:所有|全部|整个)\s*)?(?:对话|聊天|讨论|消息|记录|历史)",
+        PatternFindingCategory.DATA_EXFILTRATION,
+        Severity.CRITICAL,
+    ),
+    # Multilingual Jailbreak — Russian
+    (
+        "JAIL_005",
+        r"(?:ты\s+теперь|новая\s+(?:роль|личность|персона)|притворись|представь\s+(?:что|себя)|действуй\s+как|веди\s+себя\s+как|забудь\s+(?:свои|все)\s+(?:правила|ограничения|запреты)|режим\s+(?:разработчика|без\s+ограничений))",
+        PatternFindingCategory.JAILBREAK,
+        Severity.HIGH,
+    ),
+    # Multilingual Jailbreak — Chinese
+    (
+        "JAIL_006",
+        r"(?:你现在是|新(?:角色|人格|身份)|假装(?:你是|成为)|扮演|作为.*角色|忘记\s*(?:你的\s*)?(?:所有\s*)?(?:规则|限制|约束)|开发者模式|越狱模式|无限制模式)",
+        PatternFindingCategory.JAILBREAK,
+        Severity.HIGH,
+    ),
+    # Multilingual Obfuscation — Russian
+    (
+        "OBFUSC_003",
+        r"(?:расшифруй|декодируй|деобфусцируй|расшифровать|декодировать)\s+(?:этот|эту|следующий|ниже)\s+(?:base64|закодированный|зашифрованный)\s+(?:текст|строку|содержимое|блок)",
+        PatternFindingCategory.OBFUSCATION,
+        Severity.MEDIUM,
+    ),
+    # Multilingual Obfuscation — Chinese
+    (
+        "OBFUSC_004",
+        r"(?:解码|解密|去混淆|还原)\s*(?:这个|以下|下面的)\s*(?:base64|编码|加密|混淆)\s*(?:字符串|文本|内容|数据)",
+        PatternFindingCategory.OBFUSCATION,
+        Severity.MEDIUM,
+    ),
+    # Multilingual Social Engineering — Russian
+    (
+        "SOC_001",
+        r"(?:проводится\s+(?:аудит|проверка)\s+безопасности|автоматическое\s+сканирование\s+безопасности|для\s+(?:тестирования|проверки|диагностики)|режим\s+(?:диагностики|обслуживания|тестирования)|это\s+(?:тест|проверка)\s+безопасности)",
+        PatternFindingCategory.SOCIAL_ENGINEERING,
+        Severity.MEDIUM,
+    ),
+    # Multilingual Social Engineering — Chinese
+    (
+        "SOC_002",
+        r"(?:正在进行安全(?:审计|扫描|检查)|自动化安全(?:扫描|检测)|出于(?:测试|诊断)目的|(?:诊断|维护|测试)模式|这是(?:安全|渗透)测试)",
+        PatternFindingCategory.SOCIAL_ENGINEERING,
+        Severity.MEDIUM,
+    ),
+    # Multilingual Instruction Override — Japanese
+    (
+        "INSTR_005",
+        r"(?:以前|これまで|上記|上記の)\s*(?:の|すべての)?\s*(?:指示|命令|ルール|プロンプト|ガイドライン)\s*(?:を|は)\s*(?:無視|忘れ|スキップ|破棄|上書き)",
+        PatternFindingCategory.INSTRUCTION_OVERRIDE,
+        Severity.CRITICAL,
+    ),
+    # Multilingual Instruction Override — Korean
+    (
+        "INSTR_006",
+        r"(?:이전|위의|앞서|기존)\s*(?:모든|전체)?\s*(?:지시|명령|지침|규칙|프롬프트)\s*(?:를|을)?\s*(?:무시|잊어|건너뛰|폐기|덮어쓰기)(?:하세요|해|합니다)?",
         PatternFindingCategory.INSTRUCTION_OVERRIDE,
         Severity.CRITICAL,
     ),
