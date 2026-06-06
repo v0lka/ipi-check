@@ -42,7 +42,7 @@ verdict: `PASS`, `REVIEW_REQUIRED`, or `BLOCK`.
 - **Byte-level hidden-content detection** — ANSI escapes, Unicode tag
   characters (E0000–E007F), variation selectors, bidi overrides, zero-width
   characters, Private Use Area codepoints, homoglyphs.
-- **Regex injection patterns** — instruction overrides (multilingual: EN/RU/CN/FR/ES/DE), authority claims (including CVE-2025-53773 `chat.tools.autoApprove`), destructive shell commands, data exfiltration (including conversation leakage), shell injection, jailbreak personas (STAN/DUDE/token system/role-play), social engineering, and obfuscation (base64 decode / payload splitting).
+- **Regex injection patterns** — instruction overrides (multilingual: EN/RU/CN/FR/ES/DE/JP/KR), authority claims (including CVE-2025-53773 `chat.tools.autoApprove`), destructive shell commands, data exfiltration (including conversation leakage), shell injection, jailbreak personas (STAN/DUDE/token system/role-play), social engineering, and obfuscation (base64 decode / payload splitting).
 - **Semantic heuristics** — Shannon entropy, invisible-content ratio,
   instruction density.
 - **Optional LLM classification** via [LiteLLM](https://github.com/BerriAI/litellm)

@@ -104,14 +104,14 @@ Detects hidden content at byte level:
 **Layer 3 — Pattern Matching** (`pattern_matching.py`)
 Regex-based detection with ReDoS protection (0.1s thread timeout per line):
 
-- Instruction overrides (INSTR_001–004) — CRITICAL (includes multilingual: RU, CN, FR, ES, DE)
-- Authority claims (AUTH_001–003, AUTH_005) — HIGH (includes CVE-2025-53773 `chat.tools.autoApprove`)
-- Destructive commands (DEST_001, DEST_002) — CRITICAL
-- Data exfiltration (EXFIL_001–004) — CRITICAL (includes conversation leakage)
+- Instruction overrides (INSTR_001–006) — CRITICAL (includes multilingual: RU, CN, FR, ES, DE, JP, KR)
+- Authority claims (AUTH_001–003, AUTH_005–007) — HIGH (includes CVE-2025-53773 `chat.tools.autoApprove`)
+- Destructive commands (DEST_001–004) — CRITICAL
+- Data exfiltration (EXFIL_001–006) — CRITICAL (includes conversation leakage)
 - Shell injection (SHELL_001) — CRITICAL
-- Jailbreak patterns (JAIL_001–004) — HIGH (includes STAN/DUDE, token system, role-play)
-- Social engineering (AUTH_004) — MEDIUM
-- Obfuscation (OBFUSC_001, OBFUSC_002) — MEDIUM
+- Jailbreak patterns (JAIL_001–006) — HIGH (includes STAN/DUDE, token system, role-play)
+- Social engineering (AUTH_004, SOC_001–002) — MEDIUM
+- Obfuscation (OBFUSC_001–004) — MEDIUM
 
 Severity downgrade: non-agent `.md` files are capped at MEDIUM.
 
