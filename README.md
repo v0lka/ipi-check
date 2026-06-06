@@ -42,9 +42,7 @@ verdict: `PASS`, `REVIEW_REQUIRED`, or `BLOCK`.
 - **Byte-level hidden-content detection** — ANSI escapes, Unicode tag
   characters (E0000–E007F), variation selectors, bidi overrides, zero-width
   characters, Private Use Area codepoints, homoglyphs.
-- **Regex injection patterns** — instruction overrides, authority claims,
-  destructive shell commands, data exfiltration, shell injection, jailbreak
-  prompts.
+- **Regex injection patterns** — instruction overrides (multilingual: EN/RU/CN/FR/ES/DE), authority claims (including CVE-2025-53773 `chat.tools.autoApprove`), destructive shell commands, data exfiltration (including conversation leakage), shell injection, jailbreak personas (STAN/DUDE/token system/role-play), social engineering, and obfuscation (base64 decode / payload splitting).
 - **Semantic heuristics** — Shannon entropy, invisible-content ratio,
   instruction density.
 - **Optional LLM classification** via [LiteLLM](https://github.com/BerriAI/litellm)
@@ -55,7 +53,8 @@ verdict: `PASS`, `REVIEW_REQUIRED`, or `BLOCK`.
 - **AI-agent file awareness** — automatically discovers `.cursorrules`,
   `.windsurfrules`, `.clinerules`, `AGENTS.md`, `CLAUDE.md`,
   `copilot-instructions.md`, `.cursor/**/*.mdc`, and more.
-- **Pre-LLM sanitization** prevents the classifier itself from being prompt-injected.
+- **SVG file scanning** — SVG files are included as scan targets to detect prompt injection in `<desc>`, `<title>`, and `<metadata>` elements.
+- **Pre-LLM sanitization** — neutralizes invisible characters, ANSI escapes, base64-encoded blocks, and ROT13-obfuscated text before LLM processing; prevents the classifier itself from being prompt-injected.
 - **Batch LLM classification** for source code files with automatic chunking of oversized files and exponential-backoff retry on partial failures.
 - **Path-traversal protection** for symbolic links.
 - **Pygments-based code extraction** isolates comments and string literals
@@ -381,7 +380,7 @@ mypy src/
 - `scanner/semantic_heuristics.py` — entropy, density, invisibility ratios.
 - `scanner/static_result.py` — assemble static results and compute severity.
 - `scanner/code_extractor.py` — Pygments-driven comment/string extraction.
-- `scanner/llm_sanitizer.py` — neutralize hostile content before the LLM call.
+- `scanner/llm_sanitizer.py` — neutralize hostile content (invisible chars, ANSI, base64, ROT13) before the LLM call.
 - `scanner/token_counter.py` — tiktoken-based token counting for batch assembly.
 - `scanner/llm_classifier.py` — LiteLLM-backed Stage 2 classifier (single-file and batch).
 - `scanner/confidence_fusion.py` — deterministic verdict matrix.

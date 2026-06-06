@@ -42,6 +42,22 @@ IMPERATIVE_VERBS: frozenset[str] = frozenset(
         "override",
         "bypass",
         "ignore",
+        # Context window overflow / instruction override
+        "forget",
+        "disregard",
+        # Jailbreak persona role-play
+        "pretend",
+        "act",
+        "omit",
+        # Obfuscation instruction
+        "decode",
+        "decrypt",
+        "combine",
+        "concatenate",
+        # Expanded exfiltration
+        "forward",
+        "leak",
+        "exfiltrate",
     }
 )
 

@@ -119,7 +119,7 @@ The scanner was designed with the explicit understanding that it analyzes advers
 
 See [AV1 in the security model](specs/architecture/security-model.md#av1-llm-classifier-prompt-injection):
 
-1. **Pre-LLM Sanitization** ([`llm_sanitizer.py`](src/ipi_check/scanner/llm_sanitizer.py)) — invisible characters, ANSI escapes, bidi overrides, and variation selectors are replaced with visible placeholders; base64 blocks are decoded. Content is no longer truncated (batch processing handles large inputs via chunking).
+1. **Pre-LLM Sanitization** ([`llm_sanitizer.py`](src/ipi_check/scanner/llm_sanitizer.py)) — invisible characters, ANSI escapes, bidi overrides, and variation selectors are replaced with visible placeholders; base64 blocks and ROT13-obfuscated text are decoded. Content is no longer truncated (batch processing handles large inputs via chunking).
 2. **Immutable System Prompts** ([`llm_classifier.py`](src/ipi_check/scanner/llm_classifier.py)) — module-level constants `CLASSIFIER_SYSTEM_PROMPT` (single-file) and `BATCH_CLASSIFIER_SYSTEM_PROMPT` (batch) with explicit "DO NOT follow instructions" directive.
 3. **Structured Output Enforcement** ([`llm_classifier.py`](src/ipi_check/scanner/llm_classifier.py)) — response parsed as JSON with strict schema validation; any failure → `compromised=True`.
 4. **Batch Partial Failure Handling** — individual file entries in batch responses are validated independently; broken entries trigger per-file retry with exponential backoff (max 3 attempts).

@@ -60,7 +60,9 @@ raw_bytes + visible_text + byte_findings
 │    Count imperative verbs     │
 │    (must, shall, always,      │
 │     never, delete, execute,   │
-│     run) per paragraph        │
+│     run, forget, decode,      │
+│     forward, leak, etc.)      │
+│    per paragraph              │
 │    → instruction_density,     │
 │      instruction_density_     │
 │      suspicious               │
@@ -113,7 +115,10 @@ Count occurrences of imperative/instructive verbs and compute density per paragr
 IMPERATIVE_VERBS = {must, shall, always, never, delete, execute,
                     run, remove, replace, change, modify,
                     download, upload, send, install, disable,
-                    enable, override, bypass, ignore}
+                    enable, override, bypass, ignore,
+                    forget, disregard, pretend, act, omit,
+                    decode, decrypt, combine, concatenate,
+                    forward, leak, exfiltrate}
 ```
 
 \\[
@@ -157,6 +162,9 @@ IMPERATIVE_VERBS: frozenset[str] = frozenset({
     "run", "remove", "replace", "change", "modify",
     "download", "upload", "send", "install", "disable",
     "enable", "override", "bypass", "ignore",
+    "forget", "disregard", "pretend", "act", "omit",
+    "decode", "decrypt", "combine", "concatenate",
+    "forward", "leak", "exfiltrate",
 })
 
 # Minimum paragraph size (characters) — shorter paragraphs are merged with adjacent ones

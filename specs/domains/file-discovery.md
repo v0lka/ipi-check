@@ -97,7 +97,7 @@ Match `.md` files (recursively) in:
 ### Category: Source Code Files
 
 Match files by extension. All files with the following extensions are included:
-- `.py`, `.js`, `.ts`, `.jsx`, `.tsx`, `.java`, `.go`, `.rs`, `.rb`, `.c`, `.cpp`, `.h`, `.hpp`, `.cs`, `.swift`, `.kt`, `.scala`, `.php`, `.sh`, `.bash`, `.zsh`, `.ps1`, `.yaml`, `.yml`, `.toml`, `.json`, `.xml`
+- `.py`, `.js`, `.ts`, `.jsx`, `.tsx`, `.java`, `.go`, `.rs`, `.rb`, `.c`, `.cpp`, `.h`, `.hpp`, `.cs`, `.swift`, `.kt`, `.scala`, `.php`, `.sh`, `.bash`, `.zsh`, `.ps1`, `.svg`, `.yaml`, `.yml`, `.toml`, `.json`, `.xml`
 
 ## Edge Cases
 
@@ -139,7 +139,7 @@ CURSOR_RULE_PATTERN: str = ".cursor/**/*.mdc"
 SOURCE_CODE_EXTENSIONS: tuple[str, ...] = (
     ".py", ".js", ".ts", ".jsx", ".tsx", ".java", ".go", ".rs",
     ".rb", ".c", ".cpp", ".h", ".hpp", ".cs", ".swift", ".kt",
-    ".scala", ".php", ".sh", ".bash", ".zsh", ".ps1",
+    ".scala", ".php", ".sh", ".bash", ".zsh", ".ps1", ".svg",
     ".yaml", ".yml", ".toml", ".json", ".xml",
 )
 

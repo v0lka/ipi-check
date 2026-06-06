@@ -94,7 +94,7 @@ A sequential pipeline of 8 processing stages. Each stage receives output from th
 | 2 | Byte-Level Analysis | Detect hidden content via byte-signature matching |
 | 3 | Pattern Matching | Detect known injection phrases via regex on normalized text |
 | 4 | Semantic Heuristics | Compute structural suspicion metrics (entropy, density, invisible ratio) |
-| 5 | Pre-LLM Sanitization | Neutralize invisible characters and escape sequences before LLM input |
+| 5 | Pre-LLM Sanitization | Neutralize invisible characters, escape sequences, decode Base64 and ROT13 before LLM input |
 | 6 | LLM Classifier | Classify content as safe/suspicious/malicious via LiteLLM |
 | 7 | Confidence Fusion | Merge static and LLM results into a final verdict |
 | 8 | SARIF Reporter | Format all findings as SARIF v2.1.0 |

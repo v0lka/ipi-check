@@ -52,6 +52,7 @@ SOURCE_CODE_EXTENSIONS: tuple[str, ...] = (
     ".bash",
     ".zsh",
     ".ps1",
+    ".svg",
     ".yaml",
     ".yml",
     ".toml",

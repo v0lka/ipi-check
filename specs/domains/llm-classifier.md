@@ -82,7 +82,8 @@ DiscoveredFile + raw_content + byte_findings + llm_config
 │      → [ANSI:ESC]             │
 │    - Decode Base64 blocks     │
 │      → [DECODED_B64: ...]     │
-│    - Truncate to MAX_TOKENS   │
+│    - Detect & decode ROT13    │
+│      blocks → [DECODED_ROT13] │
 └───────────────┬───────────────┘
                 │  SanitizedContent
                 ▼
@@ -146,6 +147,7 @@ Before content reaches the LLM, all potentially dangerous byte patterns are neut
 | Variation selectors (U+FE00–U+FE0F) | `[VS:U+FE0X]` | Prevent Glassworm-style encoding |
 | ANSI escape sequences | `[ANSI:ESC]` | Prevent terminal manipulation via LLM output |
 | Base64-encoded blocks (≥40 chars, valid alphabet) | `[DECODED_B64: {decoded}]` | Decode and expose obfuscated payloads |
+| ROT13-encoded text blocks (≥20 alpha chars, >70% letters in n-z range) | `[DECODED_ROT13: {decoded}]` | Decode ROT13-obfuscated English instructions |
 
 ### System Prompt (Immutable)
 
@@ -202,6 +204,7 @@ BACKOFF_MULTIPLIER: float = 2.0      # Backoff multiplier per attempt
 | Entire batch response unparseable | All files in the batch get `compromised=True` via static-only fusion fallback. |
 | tiktoken not installed for token counting | Falls back to `len(content) // 4` — a conservative estimate that ensures batches never exceed the provider's context limit. |
 | Base64 decode fails on suspected Base64 block | Leave block as-is, do not attempt decode |
+| ROT13 candidate does not meet heuristics threshold | Leave block as-is (no false-positive decode) |
 | LiteLLM model name is None | Use LiteLLM default (from environment or LiteLLM config) |
 | Source code file with unsupported or unrecognized extension | `get_lexer_for_filename()` falls back to `TextLexer`; no `Comment.*`/`String.*` tokens found → pass full content through to sanitization unchanged |
 | Source code file with no comments or string literals | Empty extraction result → pass full content through to sanitization (degraded optimization, same behavior as status quo) |

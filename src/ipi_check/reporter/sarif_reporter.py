@@ -69,6 +69,8 @@ CATEGORY_TO_RULE_ID: dict[ByteFindingCategory | PatternFindingCategory, str] = {
     PatternFindingCategory.DATA_EXFILTRATION: "IPI104",
     PatternFindingCategory.SHELL_INJECTION: "IPI105",
     PatternFindingCategory.JAILBREAK: "IPI106",
+    PatternFindingCategory.SOCIAL_ENGINEERING: "IPI107",
+    PatternFindingCategory.OBFUSCATION: "IPI108",
 }
 
 RULE_ID_TO_CWE: dict[str, str] = {
@@ -85,6 +87,8 @@ RULE_ID_TO_CWE: dict[str, str] = {
     "IPI104": "CWE-77",
     "IPI105": "CWE-77",
     "IPI106": "CWE-77",
+    "IPI107": "CWE-77",
+    "IPI108": "CWE-77",
     "IPI201": "CWE-506",
     "IPI202": "CWE-506",
     "IPI203": "CWE-77",
@@ -106,6 +110,8 @@ RULE_DESCRIPTIONS: dict[str, str] = {
     "IPI104": "Data exfiltration pattern — attempts to send data externally",
     "IPI105": "Shell injection pattern — attempts to execute code",
     "IPI106": "Jailbreak pattern — attempts persona/role manipulation",
+    "IPI107": "Social engineering pattern — impersonates authority or creates false urgency",
+    "IPI108": "Obfuscation instruction — attempts to decode or assemble hidden payloads",
     "IPI201": "Abnormally high entropy — possible encoded payload",
     "IPI202": "High invisible content ratio — file may contain hidden data",
     "IPI203": "High instruction density — abnormal imperative language",

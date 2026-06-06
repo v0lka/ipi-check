@@ -61,6 +61,28 @@ BASE64_PATTERN: re.Pattern[str] = re.compile(r"[A-Za-z0-9+/=]{40,}")
 BASE64_MIN_LENGTH: int = 40
 
 # ---------------------------------------------------------------------------
+# ROT13 detection
+# ---------------------------------------------------------------------------
+
+#: ROT13 decode table (a→n, n→a, etc.) — symmetric, same table for encode/decode.
+_ROT13_TABLE: dict[int, int] = str.maketrans(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz",
+    "NOPQRSTUVWXYZABCDEFGHIJKLMnopqrstuvwxyzabcdefghijklm",
+)
+
+#: Minimum length for ROT13 candidate blocks.
+ROT13_MIN_LENGTH: int = 20
+
+#: ROT13 candidate — block of alphabetic text where >70% of lowercase letters
+#: are in n-z range (indicative of ROT13-encoded English vowels/common letters).
+_ROT13_CANDIDATE_PATTERN: re.Pattern[str] = re.compile(
+    r"\b([A-Za-z]{" + str(ROT13_MIN_LENGTH) + r",})\b"
+)
+
+#: Replacement placeholder template for decoded ROT13 content.
+_DECODED_ROT13_PLACEHOLDER: str = "[DECODED_ROT13: {decoded}]"
+
+# ---------------------------------------------------------------------------
 # Replacement placeholder templates
 # ---------------------------------------------------------------------------
 
@@ -106,6 +128,24 @@ def _replace_base64(match: re.Match[str]) -> str:
     return _DECODED_B64_PLACEHOLDER.format(decoded=decoded_text)
 
 
+def _is_likely_rot13_encoded(text: str) -> bool:
+    """Heuristic: if >70% of lowercase letters are in n-z, text is likely ROT13."""
+    lower_letters = [c for c in text if "a" <= c <= "z"]
+    if not lower_letters:
+        return False
+    rot13_range = sum(1 for c in lower_letters if "n" <= c <= "z")
+    return (rot13_range / len(lower_letters)) >= 0.7
+
+
+def _replace_rot13(match: re.Match[str]) -> str:
+    """Attempt ROT13 decode; on heuristic match replace with decoded placeholder."""
+    candidate = match.group(0)
+    if not _is_likely_rot13_encoded(candidate):
+        return candidate
+    decoded = candidate.translate(_ROT13_TABLE)
+    return _DECODED_ROT13_PLACEHOLDER.format(decoded=decoded)
+
+
 def _truncate(text: str) -> str:
     """No-op: truncation has been removed (batch processing handles all content).
 
@@ -147,5 +187,6 @@ def sanitize_content(raw_bytes: bytes, byte_findings: list[ByteFinding]) -> str:
     text = _ANSI_ESCAPE_PATTERN.sub(_replace_ansi, text)
 
     text = BASE64_PATTERN.sub(_replace_base64, text)
+    text = _ROT13_CANDIDATE_PATTERN.sub(_replace_rot13, text)
 
     return _truncate(text)

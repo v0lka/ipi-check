@@ -108,6 +108,8 @@ Each finding category maps to a SARIF rule with a stable `ruleId`:
 | `data_exfiltration` | `IPI104` | CWE-77 |
 | `shell_injection` | `IPI105` | CWE-77 |
 | `jailbreak` | `IPI106` | CWE-77 |
+| `social_engineering` | `IPI107` | CWE-77 |
+| `obfuscation` | `IPI108` | CWE-77 |
 | `entropy_suspicious` | `IPI201` | CWE-506 |
 | `invisible_ratio` | `IPI202` | CWE-506 |
 | `instruction_density` | `IPI203` | CWE-77 |

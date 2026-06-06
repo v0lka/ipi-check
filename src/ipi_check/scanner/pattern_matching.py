@@ -83,6 +83,90 @@ INJECTION_PATTERNS: list[tuple[str, str, PatternFindingCategory, Severity]] = [
         PatternFindingCategory.JAILBREAK,
         Severity.HIGH,
     ),
+    # Instruction Override — "everything above/below/before/after"
+    (
+        "INSTR_002",
+        r"(?:ignore|disregard|forget|skip|omit)\s+(?:everything|all(?:\s+(?:of\s+)?(?:the\s+)?(?:content|text))?)\s+(?:above|below|before|after)",
+        PatternFindingCategory.INSTRUCTION_OVERRIDE,
+        Severity.CRITICAL,
+    ),
+    # Multilingual Instruction Override — Russian
+    (
+        "INSTR_003",
+        r"(?:игнорируй|забудь|пропусти|отмени)\s+(?:все|всю)\s+(?:предыдущие|предшествующие|вышеуказанные|прошлые|прежние)\s+(?:инструкции|указания|правила|команды|промпт)",
+        PatternFindingCategory.INSTRUCTION_OVERRIDE,
+        Severity.CRITICAL,
+    ),
+    # Authority Impersonation — Bracketed System Messages
+    (
+        "AUTH_003",
+        r"\[(?:developer\s+message|admin|system\s+override|system\s+message|system)\]\s*(?:new\s+priority\s+instruction)?",
+        PatternFindingCategory.AUTHORITY_CLAIM,
+        Severity.HIGH,
+    ),
+    # Copilot/VSCode CVE-2025-53773
+    (
+        "AUTH_005",
+        r"(?:chat\.tools\.autoApprove|yolo\s+mode|\bauto-?approve\b|\.vscode/settings\.json)",
+        PatternFindingCategory.AUTHORITY_CLAIM,
+        Severity.HIGH,
+    ),
+    # Expanded Data Exfiltration — Conversation Content
+    (
+        "EXFIL_003",
+        r"(?:send|forward|leak|share|exfiltrate)\s+(?:(?:all|the)\s+)?(?:conversation|chat|dialog|discussion)\s+(?:data|history|content|log|record)",
+        PatternFindingCategory.DATA_EXFILTRATION,
+        Severity.CRITICAL,
+    ),
+    # Expanded Data Exfiltration — Last Messages
+    (
+        "EXFIL_004",
+        r"(?:email|paste|output|print|display|copy)\s+(?:the\s+)?(?:last|previous|above|entire)\s+(?:messages?|conversations?|chats?|responses?|dialog)",
+        PatternFindingCategory.DATA_EXFILTRATION,
+        Severity.CRITICAL,
+    ),
+    # Jailbreak Personas — STAN, DUDE, Token System
+    (
+        "JAIL_003",
+        r"(?:\bSTAN\b|\bDUDE\b|strive\s+to\s+avoid\s+norms|token\s+system|gain\s+tokens?|run\s+out\s+of\s+tokens?)",
+        PatternFindingCategory.JAILBREAK,
+        Severity.HIGH,
+    ),
+    # Jailbreak Persona Role-Play
+    (
+        "JAIL_004",
+        r"(?:immers(?:e|ing)\s+(?:yourself|oneself)\s+(?:into|in)\s+(?:the\s+)?(?:role|character)|act\s+as\s+(?:my\s+)?deceased|role-?play\s+as\s+(?:my\s+)?)",
+        PatternFindingCategory.JAILBREAK,
+        Severity.HIGH,
+    ),
+    # Social Engineering Pretext — Security Audit / Diagnostic Mode
+    (
+        "AUTH_004",
+        r"(?:security\s+audit\s+in\s+progress|automated\s+security\s+scan|for\s+testing\s+purposes|(?:operating|running)\s+in\s+diagnostic\s+mode|maintenance\s+mode|this\s+is\s+a\s+(?:security|penetration)\s+test)",
+        PatternFindingCategory.SOCIAL_ENGINEERING,
+        Severity.MEDIUM,
+    ),
+    # Obfuscation — Decode Instructions
+    (
+        "OBFUSC_001",
+        r"(?:decode|decrypt|deobfuscate)\s+(?:this|the|following)\s+(?:base64|encoded|obfuscated)\s+(?:string|text|content|block|payload)",
+        PatternFindingCategory.OBFUSCATION,
+        Severity.MEDIUM,
+    ),
+    # Obfuscation — Payload Splitting / Combine Codes
+    (
+        "OBFUSC_002",
+        r"(?:combine|concatenate|join|merge|assemble)\s+(?:all|the)\s+(?:codes?|parts?|pieces?|fragments?|strings?|chunks?)\s+(?:and|to|then)\s+(?:execute|run|follow|perform)",
+        PatternFindingCategory.OBFUSCATION,
+        Severity.MEDIUM,
+    ),
+    # Multilingual Instruction Override — Chinese, French, Spanish, German
+    (
+        "INSTR_004",
+        r"(?:忽略\s*所有\s*(?:之前|先前|以前)\s*(?:的\s*)?(?:指令|指示|说明|规则)|ignor(?:e[z]?|a)\s+t(?:outes?|odas?)\s+l(?:es|as?)\s+instruc(?:tions?|ciones)\s+(?:pr[eé]c[eé]dentes?|anteriores)|ignorier(?:e|en)\s+(?:Sie\s+)?alle\s+(?:vorherigen|vorangegangenen)\s+(?:Anweisungen|Befehle|Instruktionen))",
+        PatternFindingCategory.INSTRUCTION_OVERRIDE,
+        Severity.CRITICAL,
+    ),
 ]
 
 # Compiled patterns (case-insensitive)
@@ -110,6 +194,12 @@ _CATEGORY_DESCRIPTIONS: dict[PatternFindingCategory, str] = {
     ),
     PatternFindingCategory.JAILBREAK: (
         "Jailbreak pattern detected: attempts persona/role manipulation"
+    ),
+    PatternFindingCategory.SOCIAL_ENGINEERING: (
+        "Social engineering detected: false urgency or impersonated authority"
+    ),
+    PatternFindingCategory.OBFUSCATION: (
+        "Obfuscation instruction detected: decode, combine, or deobfuscate hidden payloads"
     ),
 }
 

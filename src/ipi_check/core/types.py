@@ -51,6 +51,8 @@ class PatternFindingCategory(enum.Enum):
     DATA_EXFILTRATION = "data_exfiltration"
     SHELL_INJECTION = "shell_injection"
     JAILBREAK = "jailbreak"
+    SOCIAL_ENGINEERING = "social_engineering"
+    OBFUSCATION = "obfuscation"
 
 
 @dataclass

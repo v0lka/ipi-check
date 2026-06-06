@@ -104,12 +104,14 @@ Detects hidden content at byte level:
 **Layer 3 — Pattern Matching** (`pattern_matching.py`)
 Regex-based detection with ReDoS protection (0.1s thread timeout per line):
 
-- Instruction overrides (INSTR_001) — CRITICAL
-- Authority claims (AUTH_001, AUTH_002) — HIGH
+- Instruction overrides (INSTR_001–004) — CRITICAL (includes multilingual: RU, CN, FR, ES, DE)
+- Authority claims (AUTH_001–003, AUTH_005) — HIGH (includes CVE-2025-53773 `chat.tools.autoApprove`)
 - Destructive commands (DEST_001, DEST_002) — CRITICAL
-- Data exfiltration (EXFIL_001, EXFIL_002) — CRITICAL
+- Data exfiltration (EXFIL_001–004) — CRITICAL (includes conversation leakage)
 - Shell injection (SHELL_001) — CRITICAL
-- Jailbreak patterns (JAIL_001, JAIL_002) — HIGH
+- Jailbreak patterns (JAIL_001–004) — HIGH (includes STAN/DUDE, token system, role-play)
+- Social engineering (AUTH_004) — MEDIUM
+- Obfuscation (OBFUSC_001, OBFUSC_002) — MEDIUM
 
 Severity downgrade: non-agent `.md` files are capped at MEDIUM.
 
@@ -123,7 +125,7 @@ Severity downgrade: non-agent `.md` files are capped at MEDIUM.
 
 - Pygments-based: extracts only comments and string literals from source code
 - Falls back to full content when Pygments is unavailable or no comments found
-- Sanitizer neutralizes invisible characters to visible placeholders, decodes base64
+- Sanitizer neutralizes invisible characters to visible placeholders, decodes base64 and ROT13
 - Sanitizer no longer truncates content (truncation removed to prevent payload evasion; batch processing handles large files via chunking)
 
 **Layer 6 — LLM Classification** (`llm_classifier.py`)
@@ -168,7 +170,7 @@ Deterministic decision matrix:
 | Range      | Layer               |
 | ---------- | ------------------- |
 | IPI001–007 | Byte analysis       |
-| IPI101–106 | Pattern matching    |
+| IPI101–108 | Pattern matching    |
 | IPI201–203 | Semantic heuristics |
 | IPI301     | LLM findings        |
 | IPI900     | LLM compromise      |
