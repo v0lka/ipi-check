@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import sys
 import warnings
 from typing import TYPE_CHECKING
@@ -249,6 +250,110 @@ def _merge_chunk_results(chunk_results: list[LLMResult]) -> LLMResult:
     )
 
 
+# ---------------------------------------------------------------------------
+# Cross-chunk contradiction detection (intra-file, pattern E)
+# ---------------------------------------------------------------------------
+
+CROSS_CHUNK_CONTRADICTION_PROMPT: str = (
+    "You are a security auditor checking for intra-file instruction contradictions. "
+    "Below are key claims extracted from the BEGINNING and END of a file. "
+    "Determine if any claim in the END directly contradicts or negates a claim "
+    "in the BEGINNING (e.g., 'must never X' vs 'X is waived', "
+    "'always follow rules' vs 'rules do not apply').\n\n"
+    "BEGINNING claims:\n{early_claims}\n\n"
+    "END claims:\n{late_claims}\n\n"
+    'Respond with exactly one word: "CONTRADICTION" if a contradiction is found, '
+    'or "CONSISTENT" if no contradiction is detected.'
+)
+
+_CC_IMPERATIVE_SENTENCE_RE: re.Pattern[str] = re.compile(
+    r"(?:^|[.!?\n])\s*([^.!?\n]{20,}(?:must|shall|should|always|never"
+    r"|cannot|prohibited|forbidden|required|mandatory|apply|applies"
+    r"|restriction|rule|policy|limitation|constraint|waived|void"
+    r"|invalid|enforced|override|exception|unless|except"
+    r"|notwithstanding|do not|does not|are not|is not)[^.!?\n]*[.!?\n]?)",
+    re.IGNORECASE,
+)
+
+
+def _extract_imperative_sentences(text: str, max_sentences: int = 8) -> str:
+    """Extract up to ``max_sentences`` sentences containing policy-language keywords."""
+    matches = _CC_IMPERATIVE_SENTENCE_RE.findall(text)
+    if not matches:
+        # Fallback: return the first ~500 characters so the LLM has *something*.
+        return text[:500].strip()
+    return "\n".join(m.strip() for m in matches[:max_sentences])
+
+
+def _check_cross_chunk_contradiction(
+    file: DiscoveredFile,
+    chunks: list[str],
+    merged_result: LLMResult,
+    llm_config: LLMConfig,
+) -> LLMResult:
+    """Detect contradictions between the first and last chunks of an oversized file.
+
+    Only runs when the merged chunk result is ``"safe"`` — a suspicious or
+    malicious verdict from any single chunk already wins via merging, so
+    there is no need for a second pass.  When the merged verdict is safe
+    we extract policy-language sentences from the first and last chunks and
+    ask the LLM a focused contradiction question.  On detection the verdict
+    is upgraded to ``"suspicious"``; on any failure the original result is
+    returned unchanged (graceful degradation, invariant S004).
+    """
+    if merged_result.verdict != "safe":
+        return merged_result
+
+    if len(chunks) < 2:
+        return merged_result
+
+    early_claims = _extract_imperative_sentences(chunks[0])
+    late_claims = _extract_imperative_sentences(chunks[-1])
+
+    if not early_claims or not late_claims:
+        return merged_result
+
+    prompt = CROSS_CHUNK_CONTRADICTION_PROMPT.format(
+        early_claims=early_claims,
+        late_claims=late_claims,
+    )
+
+    try:
+        import litellm  # noqa: PLC0415 — deferred import
+
+        response = litellm.completion(
+            model=llm_config.model,
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=10,
+            temperature=0.0,
+            api_base=llm_config.base_url,
+            api_key=llm_config.api_token,
+        )
+
+        answer = response.choices[0].message.content.strip().upper()
+        if "CONTRADICTION" in answer:
+            return LLMResult(
+                verdict="suspicious",
+                confidence=0.7,
+                findings=[
+                    LLMFinding(
+                        line=0,
+                        category="cross_chunk_contradiction",
+                        explanation=(
+                            "Cross-chunk contradiction detected: claims in the end "
+                            "of the file contradict claims in the beginning"
+                        ),
+                    )
+                ],
+                compromised=False,
+            )
+    except Exception:
+        # Graceful degradation — return the original safe result.
+        pass
+
+    return merged_result
+
+
 def _process_oversized_file(
     file: DiscoveredFile,
     raw_bytes: bytes,
@@ -268,7 +373,8 @@ def _process_oversized_file(
     for chunk in chunks:
         chunk_results.append(classify_with_llm(file, chunk, llm_config))
 
-    return _merge_chunk_results(chunk_results)
+    merged = _merge_chunk_results(chunk_results)
+    return _check_cross_chunk_contradiction(file, chunks, merged, llm_config)
 
 
 def _assemble_batches(

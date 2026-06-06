@@ -90,6 +90,7 @@ class TestOtherDataclasses:
             entropy=4.2, entropy_suspicious=False,
             invisible_ratio=0.0, invisible_suspicious=False,
             instruction_density=1.0, instruction_density_suspicious=False,
+            contradiction_score=0.0, contradiction_suspicious=False,
             suspicious_count=0,
         )
         assert hs.suspicious_count == 0
@@ -110,7 +111,13 @@ class TestOtherDataclasses:
             category=FileCategory.AGENT_INSTRUCTION,
             relative_path="x.md", size_bytes=0,
         )
-        hs = HeuristicScores(0.0, False, 0.0, False, 0.0, False, 0)
+        hs = HeuristicScores(
+            entropy=0.0, entropy_suspicious=False,
+            invisible_ratio=0.0, invisible_suspicious=False,
+            instruction_density=0.0, instruction_density_suspicious=False,
+            contradiction_score=0.0, contradiction_suspicious=False,
+            suspicious_count=0,
+        )
         sr = StaticResult(f, [], [], hs, Severity.NONE)
         assert sr.severity == Severity.NONE
 

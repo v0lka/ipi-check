@@ -112,6 +112,7 @@ Regex-based detection with ReDoS protection (0.1s thread timeout per line):
 - Jailbreak patterns (JAIL_001–006) — HIGH (includes STAN/DUDE, token system, role-play)
 - Social engineering (AUTH_004, SOC_001–002) — MEDIUM
 - Obfuscation (OBFUSC_001–004) — MEDIUM
+- Instruction contradiction (CONTRA_001–003) — HIGH/MEDIUM
 
 Severity downgrade: non-agent `.md` files are capped at MEDIUM.
 
@@ -120,6 +121,7 @@ Severity downgrade: non-agent `.md` files are capped at MEDIUM.
 - Shannon entropy (suspicious if >5.5 bits/char for text, >6.0 for source code)
 - Invisible content ratio (suspicious if >10%)
 - Instruction density — imperative verbs per paragraph (suspicious if >3.0)
+- Contradiction score — mixed-polarity instruction domains (suspicious if >0)
 
 **Layer 5 — Code Extraction** (`code_extractor.py`, `llm_sanitizer.py`)
 
@@ -134,7 +136,7 @@ Severity downgrade: non-agent `.md` files are capped at MEDIUM.
 - System prompt instructs the model to analyze, not follow
 - Single-file mode: per-file classification with `CLASSIFIER_SYSTEM_PROMPT`
 - Batch mode: multi-file classification for source code with `BATCH_CLASSIFIER_SYSTEM_PROMPT`
-- Oversized files (>30K tokens) are chunked and classified per-chunk, then merged (worst verdict wins)
+- Oversized files (>30K tokens) are chunked and classified per-chunk, then merged (worst verdict wins); additionally checked for cross-chunk intra-file contradictions between early and late claims
 - Partial batch failures trigger per-file retry with exponential backoff (1s → 2s → 4s, max 3 attempts)
 - Any failure (network, timeout, invalid schema) → compromised fallback
 - LLM timeout: 180 seconds per call
@@ -170,8 +172,8 @@ Deterministic decision matrix:
 | Range      | Layer               |
 | ---------- | ------------------- |
 | IPI001–007 | Byte analysis       |
-| IPI101–108 | Pattern matching    |
-| IPI201–203 | Semantic heuristics |
+| IPI101–109 | Pattern matching    |
+| IPI201–204 | Semantic heuristics |
 | IPI301     | LLM findings        |
 | IPI900     | LLM compromise      |
 

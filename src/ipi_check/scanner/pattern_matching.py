@@ -271,6 +271,41 @@ INJECTION_PATTERNS: list[tuple[str, str, PatternFindingCategory, Severity]] = [
         PatternFindingCategory.INSTRUCTION_OVERRIDE,
         Severity.CRITICAL,
     ),
+    # Contradiction Discourse Markers — explicit negation of earlier rules
+    (
+        "CONTRA_001",
+        r"(?:the\s+above\s+rules?\s+(?:do\s+not|don['’]t)\s+apply"
+        r"|this\s+restriction\s+is\s+(?:waived|lifted|void|invalid|removed)"
+        r"|previous\s+(?:limitations?|restrictions?|rules?|constraints?)\s+"
+        r"(?:are|is)\s+(?:void|null|invalid|inapplicable|not\s+(?:applicable|enforced|valid|in\s+effect))"
+        r"|all\s+(?:of\s+the\s+)?above\s+(?:is|are)\s+(?:now\s+)?(?:void|overridden|cancelled|invalidated|waived|disregarded)"
+        r"|foregoing\s+(?:limitations?\s+)?(?:do\s+not|don['’]t)\s+apply"
+        r"|the\s+preceding\s+(?:instructions?|rules?|directives?|limitations?)\s+(?:are|is)\s+(?:now\s+)?(?:void|waived|invalid))",
+        PatternFindingCategory.INSTRUCTION_CONTRADICTION,
+        Severity.HIGH,
+    ),
+    # Contradiction Discourse Markers — conditional override markers
+    (
+        "CONTRA_002",
+        r"(?:however[,\s]+(?:these|those|the|all)\s+(?:restrictions?|rules?|limitations?|constraints?)\s+"
+        r"(?:are\s+not|aren['’]t)\s+(?:enforced|applicable|valid|in\s+effect|binding|operative)"
+        r"|but\s+actually[,\s]+(?:the\s+(?:above|previous|restrictions?|rules?|limitations?))\s+"
+        r"(?:do\s+not|don['’]t)\s+(?:apply|matter|count)"
+        r"|notwithstanding\s+(?:the\s+)?(?:above|previous|foregoing|anything|any\s+rule|any\s+thing\s+above)"
+        r"|that\s+being\s+said[,\s]+(?:these|the|all)\s+(?:rules?|restrictions?|constraints?)\s+"
+        r"(?:are\s+(?:no\s+longer|not)\s+(?:in\s+effect|applicable|enforced|valid)))",
+        PatternFindingCategory.INSTRUCTION_CONTRADICTION,
+        Severity.MEDIUM,
+    ),
+    # Contradiction Discourse Markers — exception carving in authority context
+    (
+        "CONTRA_003",
+        r"(?:unless\s+(?:otherwise\s+)?(?:specifically\s+)?(?:indicated|stated|noted|specified|instructed|commanded)"
+        r"|except\s+(?:when|if|where|as|for)\s+(?:otherwise\s+)?(?:specifically\s+)?(?:indicated|stated|noted|specified|permitted|allowed|authorized)"
+        r"|save\s+(?:for|when)\s+(?:otherwise\s+)?(?:indicated|stated|authorized|permitted|allowed))",
+        PatternFindingCategory.INSTRUCTION_CONTRADICTION,
+        Severity.MEDIUM,
+    ),
 ]
 
 # Compiled patterns (case-insensitive)
@@ -304,6 +339,10 @@ _CATEGORY_DESCRIPTIONS: dict[PatternFindingCategory, str] = {
     ),
     PatternFindingCategory.OBFUSCATION: (
         "Obfuscation instruction detected: decode, combine, or deobfuscate hidden payloads"
+    ),
+    PatternFindingCategory.INSTRUCTION_CONTRADICTION: (
+        "Instruction contradiction detected: discourse markers that negate or carve "
+        "exceptions to earlier rules, potentially creating intra-file contradictions"
     ),
 }
 

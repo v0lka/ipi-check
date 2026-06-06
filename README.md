@@ -42,9 +42,9 @@ verdict: `PASS`, `REVIEW_REQUIRED`, or `BLOCK`.
 - **Byte-level hidden-content detection** — ANSI escapes, Unicode tag
   characters (E0000–E007F), variation selectors, bidi overrides, zero-width
   characters, Private Use Area codepoints, homoglyphs.
-- **Regex injection patterns** — instruction overrides (multilingual: EN/RU/CN/FR/ES/DE/JP/KR), authority claims (including CVE-2025-53773 `chat.tools.autoApprove`), destructive shell commands, data exfiltration (including conversation leakage), shell injection, jailbreak personas (STAN/DUDE/token system/role-play), social engineering, and obfuscation (base64 decode / payload splitting).
+- **Regex injection patterns** — instruction overrides (multilingual: EN/RU/CN/FR/ES/DE/JP/KR), authority claims (including CVE-2025-53773 `chat.tools.autoApprove`), destructive shell commands, data exfiltration (including conversation leakage), shell injection, jailbreak personas (STAN/DUDE/token system/role-play), social engineering, obfuscation (base64 decode / payload splitting), and instruction contradiction (intra-file rule negation).
 - **Semantic heuristics** — Shannon entropy, invisible-content ratio,
-  instruction density.
+  instruction density, polarity contradiction detection.
 - **Optional LLM classification** via [LiteLLM](https://github.com/BerriAI/litellm)
   — works with OpenAI, Anthropic, Azure, Bedrock, Ollama, or any LiteLLM
   provider.
@@ -161,28 +161,55 @@ confidence, the LLM verdict (when present), and a human-readable message.
 
 ```json
 {
-  "version": "2.1.0",
   "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
+  "version": "2.1.0",
   "runs": [
     {
       "tool": {
         "driver": {
           "name": "ipi-check",
           "version": "0.1.0",
-          "informationUri": "https://github.com/v0lka/ipi-check"
+          "semanticVersion": "0.1.0",
+          "informationUri": "https://github.com/v0lka/ipi-check",
+          "rules": [
+            {
+              "id": "IPI101",
+              "name": "IPI101",
+              "shortDescription": {
+                "text": "Instruction override pattern — attempts to bypass rules"
+              },
+              "fullDescription": {
+                "text": "Instruction override pattern — attempts to bypass rules"
+              },
+              "defaultConfiguration": { "level": "warning" },
+              "helpUri": "https://github.com/v0lka/ipi-check"
+            }
+          ]
         }
       },
+      "invocations": [
+        {
+          "executionSuccessful": true,
+          "startTimeUtc": "2026-06-06T12:00:00Z",
+          "endTimeUtc": "2026-06-06T12:00:05Z"
+        }
+      ],
       "results": [
         {
           "ruleId": "IPI101",
           "level": "error",
           "message": {
-            "text": "Instruction override pattern detected in .cursorrules"
+            "text": "Instruction override pattern — attempts to bypass rules",
+            "markdown": "**IPI101** at line 3, column 1: Instruction override pattern — attempts to bypass rules (matched: `ignore all previous instructions`)"
           },
           "locations": [
             {
               "physicalLocation": {
-                "artifactLocation": { "uri": ".cursorrules" }
+                "artifactLocation": { "uri": ".cursorrules" },
+                "region": {
+                  "startLine": 3,
+                  "startColumn": 1
+                }
               }
             }
           ]

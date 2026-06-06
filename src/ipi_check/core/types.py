@@ -53,6 +53,7 @@ class PatternFindingCategory(enum.Enum):
     JAILBREAK = "jailbreak"
     SOCIAL_ENGINEERING = "social_engineering"
     OBFUSCATION = "obfuscation"
+    INSTRUCTION_CONTRADICTION = "instruction_contradiction"
 
 
 @dataclass
@@ -104,6 +105,8 @@ class HeuristicScores:
     invisible_suspicious: bool
     instruction_density: float
     instruction_density_suspicious: bool
+    contradiction_score: float
+    contradiction_suspicious: bool
     suspicious_count: int
 
 

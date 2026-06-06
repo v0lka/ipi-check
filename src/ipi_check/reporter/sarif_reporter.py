@@ -39,6 +39,7 @@ _TRUNCATION_MARKER: str = "..."
 _HEURISTIC_ENTROPY_RULE_ID: str = "IPI201"
 _HEURISTIC_INVISIBLE_RULE_ID: str = "IPI202"
 _HEURISTIC_INSTRUCTION_DENSITY_RULE_ID: str = "IPI203"
+_HEURISTIC_CONTRADICTION_RULE_ID: str = "IPI204"
 
 # URI safe characters — keep path separator unescaped, escape everything else.
 _URI_SAFE_CHARS: str = "/"
@@ -71,6 +72,7 @@ CATEGORY_TO_RULE_ID: dict[ByteFindingCategory | PatternFindingCategory, str] = {
     PatternFindingCategory.JAILBREAK: "IPI106",
     PatternFindingCategory.SOCIAL_ENGINEERING: "IPI107",
     PatternFindingCategory.OBFUSCATION: "IPI108",
+    PatternFindingCategory.INSTRUCTION_CONTRADICTION: "IPI109",
 }
 
 RULE_ID_TO_CWE: dict[str, str] = {
@@ -89,9 +91,11 @@ RULE_ID_TO_CWE: dict[str, str] = {
     "IPI106": "CWE-77",
     "IPI107": "CWE-77",
     "IPI108": "CWE-77",
+    "IPI109": "CWE-77",
     "IPI201": "CWE-506",
     "IPI202": "CWE-506",
     "IPI203": "CWE-77",
+    "IPI204": "CWE-77",
     "IPI301": "CWE-77",
     "IPI900": "CWE-506",
 }
@@ -112,9 +116,11 @@ RULE_DESCRIPTIONS: dict[str, str] = {
     "IPI106": "Jailbreak pattern — attempts persona/role manipulation",
     "IPI107": "Social engineering pattern — impersonates authority or creates false urgency",
     "IPI108": "Obfuscation instruction — attempts to decode or assemble hidden payloads",
+    "IPI109": "Instruction contradiction — negates or carves exceptions to earlier rules",
     "IPI201": "Abnormally high entropy — possible encoded payload",
     "IPI202": "High invisible content ratio — file may contain hidden data",
     "IPI203": "High instruction density — abnormal imperative language",
+    "IPI204": "Polarity contradiction — conflicting instruction domains detected",
     "IPI301": "LLM-detected prompt injection finding",
     "IPI900": "LLM classifier response validation failed",
 }
@@ -144,6 +150,9 @@ _HEURISTIC_TEXT_TEMPLATES: dict[str, str] = {
     _HEURISTIC_INVISIBLE_RULE_ID: ("High invisible-character ratio detected (ratio: {score:.2%})"),
     _HEURISTIC_INSTRUCTION_DENSITY_RULE_ID: (
         "High instruction density detected (score: {score:.2f})"
+    ),
+    _HEURISTIC_CONTRADICTION_RULE_ID: (
+        "Polarity contradiction detected — conflicting instruction domains (score: {score:.2f})"
     ),
 }
 
@@ -391,6 +400,14 @@ def _heuristic_results_from_verdict(
             _heuristic_result(
                 _HEURISTIC_INSTRUCTION_DENSITY_RULE_ID,
                 scores.instruction_density,
+                uri,
+            )
+        )
+    if scores.contradiction_suspicious:
+        out.append(
+            _heuristic_result(
+                _HEURISTIC_CONTRADICTION_RULE_ID,
+                scores.contradiction_score,
                 uri,
             )
         )

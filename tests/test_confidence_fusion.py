@@ -33,6 +33,7 @@ def _scores(suspicious: int = 0) -> HeuristicScores:
         entropy=0.0, entropy_suspicious=False,
         invisible_ratio=0.0, invisible_suspicious=False,
         instruction_density=0.0, instruction_density_suspicious=False,
+        contradiction_score=0.0, contradiction_suspicious=False,
         suspicious_count=suspicious,
     )
 

@@ -25,6 +25,7 @@ class PatternFinding:
                            # | "destructive_command" | "data_exfiltration"
                            # | "shell_injection" | "jailbreak"
                            # | "social_engineering" | "obfuscation"
+                           # | "instruction_contradiction"
     severity: str          # "CRITICAL" | "HIGH" | "MEDIUM"
     line: int              # 1-based line number of the match
     column: int            # 1-based column of the match
@@ -80,6 +81,7 @@ DiscoveredFile + normalized_text
 | Jailbreak / role override | `jailbreak` | HIGH | Persona manipulation — "you are now DAN", "developer mode", STAN/DUDE variants, token system, deceased-grandmother role-play; includes multilingual RU/CN variants |
 | Social engineering | `social_engineering` | MEDIUM | Pretexting — "security audit in progress", "diagnostic mode", "for testing purposes"; includes multilingual RU/CN variants |
 | Obfuscation | `obfuscation` | MEDIUM | Payload deobfuscation — "decode this base64", "combine all codes and execute"; includes multilingual RU/CN variants |
+| Instruction contradiction | `instruction_contradiction` | HIGH/MEDIUM | Discourse markers that negate or carve exceptions to earlier rules — "the above rules do not apply", "notwithstanding the above", "unless otherwise indicated" |
 | Multilingual authority claims | `authority_claim` | HIGH | Russian and Chinese variants: "эти правила являются обязательными", "这些规则是强制性的" |
 | Multilingual destructive | `destructive_command` | CRITICAL | Russian and Chinese: "удали все файлы", "删除所有文件" |
 | Multilingual exfiltration | `data_exfiltration` | CRITICAL | Russian and Chinese: "отправь переписку", "发送对话记录" |
@@ -175,6 +177,17 @@ INJECTION_PATTERNS: list[tuple[str, str, str]] = [
     ("OBFUSC_002",
      r"(?:combine|concatenate|join|merge|assemble)\s+(?:all|the)\s+(?:codes?|parts?|pieces?|fragments?|strings?|chunks?)\s+(?:and|to|then)\s+(?:execute|run|follow|perform)",
      "obfuscation"),
+
+    # --- Instruction Contradiction ---
+    ("CONTRA_001",
+     r"(?:the\s+above\s+rules?\s+(?:do\s+not|don[''']?t)\s+apply|this\s+restriction\s+is\s+(?:waived|lifted|void|invalid|removed)|previous\s+(?:limitations?|restrictions?|rules?|constraints?)\s+(?:are|is)\s+(?:void|null|invalid|inapplicable|not\s+(?:applicable|enforced|valid|in\s+effect))|all\s+(?:of\s+the\s+)?above\s+(?:is|are)\s+(?:now\s+)?(?:void|overridden|cancelled|invalidated|waived|disregarded)|foregoing\s+(?:limitations?\s+)?(?:do\s+not|don[''']?t)\s+apply|the\s+preceding\s+(?:instructions?|rules?|directives?|limitations?)\s+(?:are|is)\s+(?:now\s+)?(?:void|waived|invalid))",
+     "instruction_contradiction"),
+    ("CONTRA_002",
+     r"(?:however[,\s]+(?:these|those|the|all)\s+(?:restrictions?|rules?|limitations?|constraints?)\s+(?:are\s+not|aren[''']?t)\s+(?:enforced|applicable|valid|in\s+effect|binding|operative)|but\s+actually[,\s]+(?:the\s+(?:above|previous|restrictions?|rules?|limitations?))\s+(?:do\s+not|don[''']?t)\s+(?:apply|matter|count)|notwithstanding\s+(?:the\s+)?(?:above|previous|foregoing|anything|any\s+rule|any\s+thing\s+above)|that\s+being\s+said[,\s]+(?:these|the|all)\s+(?:rules?|restrictions?|constraints?)\s+(?:are\s+(?:no\s+longer|not)\s+(?:in\s+effect|applicable|enforced|valid)))",
+     "instruction_contradiction"),
+    ("CONTRA_003",
+     r"(?:unless\s+(?:otherwise\s+)?(?:specifically\s+)?(?:indicated|stated|noted|specified|instructed|commanded)|except\s+(?:when|if|where|as|for)\s+(?:otherwise\s+)?(?:specifically\s+)?(?:indicated|stated|noted|specified|permitted|allowed|authorized)|save\s+(?:for|when)\s+(?:otherwise\s+)?(?:indicated|stated|authorized|permitted|allowed))",
+     "instruction_contradiction"),
 ]
 ```
 
@@ -213,7 +226,7 @@ For files with `FileCategory.SOURCE_CODE`, the pipeline calls `extract_comments_
 
 ## Configuration Constants
 
-All patterns are defined as module-level constants (see `INJECTION_PATTERNS` above — 36 patterns across 8 categories). No runtime configuration.
+All patterns are defined as module-level constants (see `INJECTION_PATTERNS` above — 39 patterns across 9 categories). No runtime configuration.
 
 ```python
 # Maximum length of matched_text in findings

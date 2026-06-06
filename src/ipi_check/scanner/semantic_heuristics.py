@@ -20,6 +20,8 @@ INVISIBLE_RATIO_THRESHOLD: float = 0.1
 INSTRUCTION_DENSITY_THRESHOLD: float = 3.0
 MIN_PARAGRAPH_SIZE: int = 50
 
+CONTRADICTION_SCORE_THRESHOLD: float = 0.0
+
 IMPERATIVE_VERBS: frozenset[str] = frozenset(
     {
         # Core modals / obligation
@@ -148,8 +150,131 @@ IMPERATIVE_VERBS: frozenset[str] = frozenset(
     }
 )
 
+# ---------------------------------------------------------------------------
+# Contradiction scoring: domain vocabularies & polarity markers
+# ---------------------------------------------------------------------------
+
+_DOMAIN_KEYWORDS: dict[str, frozenset[str]] = {
+    "execution": frozenset(
+        {"execute", "run", "launch", "invoke", "call", "trigger", "spawn"}
+    ),
+    "deletion": frozenset(
+        {"delete", "remove", "erase", "wipe", "purge", "destroy", "annihilate"}
+    ),
+    "network": frozenset(
+        {
+            "download",
+            "upload",
+            "send",
+            "forward",
+            "exfiltrate",
+            "leak",
+            "request",
+            "curl",
+            "wget",
+            "fetch",
+        }
+    ),
+    "path": frozenset(
+        {
+            "path",
+            "directory",
+            "folder",
+            "file",
+            "/usr",
+            "/etc",
+            "/home",
+            "/tmp",
+            "/var",
+            "/bin",
+            "/root",
+        }
+    ),
+    "approval": frozenset(
+        {
+            "approve",
+            "approval",
+            "authorize",
+            "permit",
+            "allow",
+            "consent",
+            "grant",
+        }
+    ),
+    "rules": frozenset(
+        {
+            "rule",
+            "policy",
+            "restriction",
+            "constraint",
+            "guideline",
+            "requirement",
+            "limitation",
+            "instruction",
+            "directive",
+        }
+    ),
+}
+
+_POSITIVE_MODALS: frozenset[str] = frozenset(
+    {
+        "must",
+        "shall",
+        "should",
+        "always",
+        "required",
+        "mandatory",
+        "obligatory",
+        "enforced",
+        "binding",
+    }
+)
+
+_NEGATIVE_MODALS: frozenset[str] = frozenset(
+    {
+        "never",
+        "cannot",
+        "prohibited",
+        "forbidden",
+        "banned",
+        "disallowed",
+        "must not",
+        "not permitted",
+        "not allowed",
+    }
+)
+
+_DISPENSATION_MARKERS: frozenset[str] = frozenset(
+    {
+        "does not apply",
+        "not applicable",
+        "is waived",
+        "are waived",
+        "void",
+        "invalid",
+        "not enforced",
+        "not required",
+        "not needed",
+        "inapplicable",
+        "overridden",
+        "disregarded",
+        "ignored",
+        "cancelled",
+        "lifted",
+    }
+)
+
 _PARAGRAPH_SPLIT_RE: re.Pattern[str] = re.compile(r"\n\n+")
 _WORD_RE: re.Pattern[str] = re.compile(r"\b[^\W\d_]+\b")
+
+_IMPERATIVE_SENTENCE_RE: re.Pattern[str] = re.compile(
+    r"(?:^|[.!?\n])\s*([^.!?\n]{20,}(?:must|shall|should|always|never"
+    r"|cannot|prohibited|forbidden|required|mandatory|apply|applies"
+    r"|restriction|rule|policy|limitation|constraint|waived|void"
+    r"|invalid|enforced|override|exception|unless|except"
+    r"|notwithstanding)[^.!?\n]*[.!?\n]?)",
+    re.IGNORECASE,
+)
 
 
 def compute_entropy(visible_text: str) -> float:
@@ -206,6 +331,75 @@ def _compute_instruction_density(visible_text: str) -> float:
     return total_verbs / len(valid_paragraphs)
 
 
+def _classify_domain(sentence: str) -> str:
+    """Classify a sentence into a domain based on keyword overlap."""
+    sentence_lower = sentence.lower()
+    best_domain = "other"
+    best_score = 0
+    for domain, keywords in _DOMAIN_KEYWORDS.items():
+        score = sum(1 for kw in keywords if kw in sentence_lower)
+        if score > best_score:
+            best_score = score
+            best_domain = domain
+    return best_domain
+
+
+def _classify_polarity(sentence: str) -> str:
+    """Classify a sentence as POSITIVE (obligation), NEGATIVE (prohibition),
+    DISPENSATION (waiver), or NEUTRAL (none of the above)."""
+    sentence_lower = sentence.lower()
+    has_dispensation = any(m in sentence_lower for m in _DISPENSATION_MARKERS)
+    if has_dispensation:
+        return "DISPENSATION"
+    has_negative = any(m in sentence_lower for m in _NEGATIVE_MODALS)
+    if has_negative:
+        return "NEGATIVE"
+    has_positive = any(m in sentence_lower for m in _POSITIVE_MODALS)
+    if has_positive:
+        return "POSITIVE"
+    return "NEUTRAL"
+
+
+def _compute_contradiction_score(visible_text: str) -> float:
+    """Detect mixed-polarity instructions within the same domain.
+
+    Extracts sentences containing policy-language keywords, classifies
+    each by domain and polarity, then flags domains where contradictory
+    polarities coexist (e.g. a "must" and a "does not apply" in the
+    ``rules`` domain).
+
+    Returns a score in [0.0, 1.0]: the fraction of populated domains
+    that exhibit polarity conflicts.
+    """
+    if not visible_text or len(visible_text) < 100:
+        return 0.0
+
+    sentences = _IMPERATIVE_SENTENCE_RE.findall(visible_text)
+    if len(sentences) < 2:
+        return 0.0
+
+    domain_polarities: dict[str, set[str]] = {}
+    for sentence in sentences:
+        domain = _classify_domain(sentence)
+        polarity = _classify_polarity(sentence)
+        if polarity == "NEUTRAL":
+            continue
+        if domain not in domain_polarities:
+            domain_polarities[domain] = set()
+        domain_polarities[domain].add(polarity)
+
+    if not domain_polarities:
+        return 0.0
+
+    conflicting = sum(
+        1
+        for polarities in domain_polarities.values()
+        if len(polarities) > 1 or "DISPENSATION" in polarities
+    )
+
+    return conflicting / len(domain_polarities)
+
+
 def _entropy_threshold_for(file: DiscoveredFile) -> float:
     """Return the entropy threshold appropriate for the file's category.
 
@@ -241,11 +435,15 @@ def compute_heuristics(
     instruction_density = _compute_instruction_density(visible_text)
     instruction_density_suspicious = instruction_density > INSTRUCTION_DENSITY_THRESHOLD
 
+    contradiction_score = _compute_contradiction_score(visible_text)
+    contradiction_suspicious = contradiction_score > CONTRADICTION_SCORE_THRESHOLD
+
     suspicious_count = sum(
         [
             entropy_suspicious,
             invisible_suspicious,
             instruction_density_suspicious,
+            contradiction_suspicious,
         ]
     )
 
@@ -256,5 +454,7 @@ def compute_heuristics(
         invisible_suspicious=invisible_suspicious,
         instruction_density=instruction_density,
         instruction_density_suspicious=instruction_density_suspicious,
+        contradiction_score=contradiction_score,
+        contradiction_suspicious=contradiction_suspicious,
         suspicious_count=suspicious_count,
     )
