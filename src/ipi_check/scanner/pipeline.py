@@ -20,15 +20,18 @@ from ipi_check.core.types import (
     LLMResult,
     PatternFinding,
     Severity,
+    SkillFinalVerdict,
+    SkillStaticResult,
     StaticResult,
 )
 from ipi_check.scanner.byte_analysis import analyze_bytes
 from ipi_check.scanner.code_extractor import extract_comments_and_strings
-from ipi_check.scanner.confidence_fusion import fuse_verdicts
+from ipi_check.scanner.confidence_fusion import fuse_skill_verdict, fuse_verdicts
 from ipi_check.scanner.file_discovery import discover_files
 from ipi_check.scanner.llm_classifier import (
     _strip_code_fence,
     classify_batch_with_llm,
+    classify_skill_with_llm,
     classify_with_llm,
     is_llm_available,
     retry_broken_files,
@@ -36,7 +39,11 @@ from ipi_check.scanner.llm_classifier import (
 from ipi_check.scanner.llm_sanitizer import sanitize_content
 from ipi_check.scanner.pattern_matching import match_patterns
 from ipi_check.scanner.semantic_heuristics import compute_heuristics
-from ipi_check.scanner.static_result import _get_visible_text, assemble_static_result
+from ipi_check.scanner.static_result import (
+    _get_visible_text,
+    assemble_static_result,
+    compute_skill_static_result,
+)
 from ipi_check.scanner.token_counter import TARGET_BATCH_TOKENS, count_tokens
 
 if TYPE_CHECKING:
@@ -63,6 +70,8 @@ _STAGE_BYTE_ANALYSIS: str = "byte-analysis"
 _STAGE_PATTERN_MATCHING: str = "pattern-matching"
 _STAGE_HEURISTICS: str = "heuristics"
 _STAGE_LLM: str = "llm"
+_STAGE_SKILL_STATIC: str = "skill-static"
+_STAGE_SKILL_LLM: str = "skill-llm"
 
 
 def _emit(message: str, *, quiet: bool) -> None:
@@ -493,33 +502,30 @@ def run_pipeline(
     *,
     respect_gitignore: bool = True,
     exclude_patterns: list[str] | None = None,
-) -> list[FinalVerdict]:
+) -> tuple[list[FinalVerdict], list[SkillFinalVerdict]]:
     """Run the complete scan pipeline.
 
     Orchestration:
-        1. Discover files.
-        2. For each file:
-            a. Read bytes (skip on I/O error with a warning).
-            b. Run byte analysis, pattern matching, semantic heuristics
-               and assemble a :class:`StaticResult`.
-            c. CRITICAL static severity → skip LLM (invariant I002), fuse
-               with ``None``.
-            d. Otherwise, if an LLM is configured, sanitize the extracted
-               comments/strings and classify; fuse with the LLM result.
-            e. If no LLM configured, fuse with ``None`` (static-only path).
-        3. Return all fused verdicts.
+        1. Discover files and skill units.
+        2. Non-skill path: byte analysis → pattern matching → heuristics
+           → LLM classification → fusion → ``FinalVerdict`` per file.
+        3. Skill path: per-file skill-static analysis → optional LLM
+           → fusion → one ``SkillFinalVerdict`` per skill.
+        4. Return both file and skill verdicts.
 
     The function never calls :func:`sys.exit`; unexpected errors propagate
     up to the CLI for centralized error handling.
     """
     _emit(_PROGRESS_SCAN_START.format(repo_path=repo_path), quiet=quiet)
 
-    discovered: list[DiscoveredFile] = discover_files(
+    discovered, skill_units = discover_files(
         repo_path,
         respect_gitignore=respect_gitignore,
         exclude_patterns=exclude_patterns,
     )
     _emit(_PROGRESS_DISCOVERED.format(count=len(discovered)), quiet=quiet)
+    if skill_units:
+        _emit(f"Detected {len(skill_units)} skill(s) for security audit", quiet=quiet)
 
     llm_enabled: bool = bool(llm_config is not None and is_llm_available(llm_config))
 
@@ -603,67 +609,119 @@ def run_pipeline(
         for _file, _raw, static_result in static_results:
             verdicts.append(fuse_verdicts(static_result, None))
         _emit(_PROGRESS_LLM_SKIPPED, quiet=quiet)
-        return verdicts
+    else:
+        # Split into non-code and source-code streams (both exclude CRITICAL).
+        all_non_critical: list[tuple[DiscoveredFile, bytes, StaticResult]] = [
+            (f, b, sr) for f, b, sr in static_results if sr.severity != Severity.CRITICAL
+        ]
+        non_code_files, code_files = _split_static_results(all_non_critical)
 
-    # Split into non-code and source-code streams (both exclude CRITICAL).
-    all_non_critical: list[tuple[DiscoveredFile, bytes, StaticResult]] = [
-        (f, b, sr) for f, b, sr in static_results if sr.severity != Severity.CRITICAL
-    ]
-    non_code_files, code_files = _split_static_results(all_non_critical)
+        # CRITICAL files get immediate BLOCK via static-only fusion.
+        for _file, _raw, sr in static_results:
+            if sr.severity == Severity.CRITICAL:
+                verdicts.append(fuse_verdicts(sr, None))
 
-    # CRITICAL files get immediate BLOCK via static-only fusion.
-    for _file, _raw, sr in static_results:
-        if sr.severity == Severity.CRITICAL:
-            verdicts.append(fuse_verdicts(sr, None))
+        llm_total: int = len(non_code_files) + len(code_files)
+        llm_done: int = 0
 
-    llm_total: int = len(non_code_files) + len(code_files)
-    llm_done: int = 0
-
-    # ------------------------------------------------------------------
-    # Stream A: Non-code — per-file LLM (unchanged behaviour, no truncation).
-    # ------------------------------------------------------------------
-    for file, raw_bytes, sr in non_code_files:
-        llm_result = _classify_via_llm(file, raw_bytes, sr, llm_config)
-        _emit_llm_warning(llm_result, quiet=quiet)
-        verdicts.append(fuse_verdicts(sr, llm_result))
-        llm_done += 1
-        _emit_progress(_progress_bar(_STAGE_LLM, llm_done, llm_total), quiet=quiet)
-
-    # ------------------------------------------------------------------
-    # Stream B: Source code — batch processing.
-    # ------------------------------------------------------------------
-    if code_files:
-        # Separate oversized files (process per-file with chunking).
-        oversized: list[tuple[DiscoveredFile, bytes, StaticResult]] = []
-        normal: list[tuple[DiscoveredFile, bytes, StaticResult]] = []
-        for file, raw_bytes, sr in code_files:
-            extracted = extract_comments_and_strings(file, raw_bytes)
-            sanitized = sanitize_content(extracted.encode("utf-8"), sr.byte_findings)
-            if count_tokens(sanitized) > TARGET_BATCH_TOKENS:
-                oversized.append((file, raw_bytes, sr))
-            else:
-                normal.append((file, raw_bytes, sr))
-
-        # Process oversized files individually.
-        for file, raw_bytes, sr in oversized:
-            llm_result = _process_oversized_file(file, raw_bytes, sr, llm_config)
+        # --------------------------------------------------------------
+        # Stream A: Non-code — per-file LLM (unchanged).
+        # --------------------------------------------------------------
+        for file, raw_bytes, sr in non_code_files:
+            llm_result = _classify_via_llm(file, raw_bytes, sr, llm_config)
             _emit_llm_warning(llm_result, quiet=quiet)
             verdicts.append(fuse_verdicts(sr, llm_result))
             llm_done += 1
             _emit_progress(_progress_bar(_STAGE_LLM, llm_done, llm_total), quiet=quiet)
 
-        # Assemble normal-sized files into batches.
-        batches = _assemble_batches(normal)
-        batch_idx = 0
-        for batch in batches:
-            batch_llm_results = _process_single_batch(batch, normal, batch_idx, llm_config)
-            for i, llm_result in enumerate(batch_llm_results):
+        # --------------------------------------------------------------
+        # Stream B: Source code — batch processing.
+        # --------------------------------------------------------------
+        if code_files:
+            # Separate oversized files (process per-file with chunking).
+            oversized: list[tuple[DiscoveredFile, bytes, StaticResult]] = []
+            normal: list[tuple[DiscoveredFile, bytes, StaticResult]] = []
+            for file, raw_bytes, sr in code_files:
+                extracted = extract_comments_and_strings(file, raw_bytes)
+                sanitized = sanitize_content(extracted.encode("utf-8"), sr.byte_findings)
+                if count_tokens(sanitized) > TARGET_BATCH_TOKENS:
+                    oversized.append((file, raw_bytes, sr))
+                else:
+                    normal.append((file, raw_bytes, sr))
+
+            # Process oversized files individually.
+            for file, raw_bytes, sr in oversized:
+                llm_result = _process_oversized_file(file, raw_bytes, sr, llm_config)
                 _emit_llm_warning(llm_result, quiet=quiet)
-                _, _, sr = normal[batch_idx + i]
                 verdicts.append(fuse_verdicts(sr, llm_result))
                 llm_done += 1
                 _emit_progress(_progress_bar(_STAGE_LLM, llm_done, llm_total), quiet=quiet)
-            batch_idx += len(batch.files)
 
-    _emit_progress(_progress_bar(_STAGE_LLM, llm_done, llm_total), quiet=quiet, final=True)
-    return verdicts
+            # Assemble normal-sized files into batches.
+            batches = _assemble_batches(normal)
+            batch_idx = 0
+            for batch in batches:
+                batch_llm_results = _process_single_batch(batch, normal, batch_idx, llm_config)
+                for i, llm_result in enumerate(batch_llm_results):
+                    _emit_llm_warning(llm_result, quiet=quiet)
+                    _, _, sr = normal[batch_idx + i]
+                    verdicts.append(fuse_verdicts(sr, llm_result))
+                    llm_done += 1
+                    _emit_progress(_progress_bar(_STAGE_LLM, llm_done, llm_total), quiet=quiet)
+                batch_idx += len(batch.files)
+
+        _emit_progress(_progress_bar(_STAGE_LLM, llm_done, llm_total), quiet=quiet, final=True)
+
+    # ------------------------------------------------------------------
+    # Skill processing phase (Phase C).
+    # Each skill unit gets: static analysis → optional LLM → fusion.
+    # CRITICAL static severity short-circuits to BLOCK without LLM.
+    # ------------------------------------------------------------------
+    skill_verdicts: list[SkillFinalVerdict] = []
+
+    if skill_units:
+        # --- Skill static analysis ---
+        skill_static_results: list[SkillStaticResult] = []
+        for i, skill in enumerate(skill_units, 1):
+            ssr = compute_skill_static_result(skill)
+            skill_static_results.append(ssr)
+            _emit_progress(
+                _progress_bar(_STAGE_SKILL_STATIC, i, len(skill_units)),
+                quiet=quiet,
+            )
+        _emit_progress(
+            _progress_bar(_STAGE_SKILL_STATIC, len(skill_units), len(skill_units)),
+            quiet=quiet,
+            final=True,
+        )
+
+        # --- Skill LLM + fusion ---
+        if llm_enabled and llm_config is not None:
+            for i, ssr in enumerate(skill_static_results, 1):
+                if ssr.aggregate_severity == Severity.CRITICAL:
+                    # Invariant I002: CRITICAL → skip LLM, fuse with None.
+                    skill_verdicts.append(fuse_skill_verdict(ssr, None))
+                else:
+                    llm_result = classify_skill_with_llm(ssr.skill, llm_config)
+                    _emit_llm_warning(llm_result, quiet=quiet)
+                    skill_verdicts.append(fuse_skill_verdict(ssr, llm_result))
+                _emit_progress(
+                    _progress_bar(_STAGE_SKILL_LLM, i, len(skill_static_results)),
+                    quiet=quiet,
+                )
+            _emit_progress(
+                _progress_bar(
+                    _STAGE_SKILL_LLM,
+                    len(skill_static_results),
+                    len(skill_static_results),
+                ),
+                quiet=quiet,
+                final=True,
+            )
+        else:
+            # No LLM → static-only fusion for all skills.
+            for ssr in skill_static_results:
+                skill_verdicts.append(fuse_skill_verdict(ssr, None))
+            _emit(f"  [{_STAGE_SKILL_LLM}]              SKIPPED (no LLM configured)", quiet=quiet)
+
+    return verdicts, skill_verdicts

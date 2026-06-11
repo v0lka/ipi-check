@@ -12,12 +12,14 @@ from ipi_check.core.types import (
     HeuristicScores,
     PatternFinding,
     Severity,
+    SkillStaticResult,
+    SkillUnit,
     StaticResult,
 )
 from ipi_check.scanner.byte_analysis import analyze_bytes
 from ipi_check.scanner.code_extractor import extract_comments_and_strings
 from ipi_check.scanner.file_discovery import discover_files
-from ipi_check.scanner.pattern_matching import match_patterns
+from ipi_check.scanner.pattern_matching import match_patterns, match_skill_patterns
 from ipi_check.scanner.semantic_heuristics import compute_heuristics
 
 if TYPE_CHECKING:
@@ -132,18 +134,71 @@ def _read_file_bytes(file: DiscoveredFile) -> bytes | None:
         return None
 
 
+def compute_skill_static_result(skill: SkillUnit) -> SkillStaticResult:
+    """Run static analysis on all files in a skill unit.
+
+    For each file in the skill: byte analysis + skill-specific pattern
+    matching.  Heuristics are computed once on the SKILL.md body.
+    Severity is aggregated as the worst across all findings.
+    """
+    all_byte_findings: list[list[ByteFinding]] = []
+    all_pattern_findings: list[list[PatternFinding]] = []
+
+    for file in skill.files:
+        raw_bytes = _read_file_bytes(file)
+        if raw_bytes is None:
+            all_byte_findings.append([])
+            all_pattern_findings.append([])
+            continue
+
+        byte_findings = analyze_bytes(file, raw_bytes)
+        all_byte_findings.append(byte_findings)
+
+        pattern_findings = match_skill_patterns(file, raw_bytes)
+        all_pattern_findings.append(pattern_findings)
+
+    # Compute heuristics on SKILL.md body
+    metadata_bytes = skill.body.encode("utf-8")
+    visible_text = _get_visible_text(metadata_bytes)
+    metadata_byte_findings = analyze_bytes(skill.metadata_file, metadata_bytes)
+    heuristic_scores = compute_heuristics(
+        skill.metadata_file, metadata_bytes, visible_text, metadata_byte_findings
+    )
+
+    # Aggregate severity across all files
+    flat_byte: list[ByteFinding] = [
+        f for per_file in all_byte_findings for f in per_file
+    ]
+    flat_pattern: list[PatternFinding] = [
+        f for per_file in all_pattern_findings for f in per_file
+    ]
+    aggregate_severity = compute_static_severity(
+        flat_byte, flat_pattern, heuristic_scores
+    )
+
+    return SkillStaticResult(
+        skill=skill,
+        file_byte_findings=all_byte_findings,
+        file_pattern_findings=all_pattern_findings,
+        metadata_heuristic_scores=heuristic_scores,
+        aggregate_severity=aggregate_severity,
+    )
+
+
 def run_static_pipeline(
     repo_path: Path,
     *,
     respect_gitignore: bool = True,
     exclude_patterns: list[str] | None = None,
-) -> list[StaticResult]:
+) -> tuple[list[StaticResult], list[SkillStaticResult]]:
     """Run the complete static analysis pipeline (layers 1-4).
 
     Orchestrates: File Discovery → for each file: read bytes → Byte Analysis
     → Pattern Matching + Semantic Heuristics → assemble :class:`StaticResult`.
+
+    Returns a tuple of ``(non_skill_results, skill_static_results)``.
     """
-    discovered = discover_files(
+    discovered, skill_units = discover_files(
         repo_path,
         respect_gitignore=respect_gitignore,
         exclude_patterns=exclude_patterns,
@@ -172,4 +227,9 @@ def run_static_pipeline(
             )
         )
 
-    return results
+    # Skill static analysis
+    skill_results: list[SkillStaticResult] = [
+        compute_skill_static_result(skill) for skill in skill_units
+    ]
+
+    return results, skill_results

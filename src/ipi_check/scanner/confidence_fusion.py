@@ -9,6 +9,8 @@ from ipi_check.core.types import (
     LLMResult,
     PatternFinding,
     Severity,
+    SkillFinalVerdict,
+    SkillStaticResult,
     StaticResult,
     VerdictDecision,
 )
@@ -239,4 +241,89 @@ def fuse_verdicts(
         all_findings=all_findings,
         reasoning=reasoning,
         heuristic_scores=static_result.heuristic_scores,
+    )
+
+
+def fuse_skill_verdict(
+    skill_static: SkillStaticResult,
+    llm_result: LLMResult | None,
+) -> SkillFinalVerdict:
+    """Fuse static analysis and LLM classification for a skill unit.
+
+    Uses the same decision matrix as :func:`fuse_verdicts`:
+
+    - CRITICAL static severity always → BLOCK (LLM skipped).
+    - Otherwise apply the severity+LLM confidence matrix.
+    - Compromised or absent LLM → static-only fallback.
+
+    Returns a single :class:`SkillFinalVerdict` for the entire skill.
+    """
+    severity: Severity = skill_static.aggregate_severity
+    skill = skill_static.skill
+
+    # Collect all findings across every file in the skill.
+    all_findings: list[ByteFinding | PatternFinding | LLMFinding] = []
+    for per_file in skill_static.file_byte_findings:
+        all_findings.extend(per_file)
+    for per_file in skill_static.file_pattern_findings:
+        all_findings.extend(per_file)
+
+    # Determine effective LLM state.
+    llm_compromised = bool(llm_result is not None and llm_result.compromised)
+    llm_usable = llm_result is not None and not llm_compromised
+    llm_verdict_value: str | None = (
+        llm_result.verdict if llm_result is not None and not llm_compromised else None
+    )
+    llm_confidence_value: float | None = (
+        llm_result.confidence if llm_result is not None and not llm_compromised else None
+    )
+
+    if llm_usable and llm_result is not None:
+        all_findings.extend(llm_result.findings)
+
+    # Short-circuit: CRITICAL static finding always BLOCKs.
+    if severity == Severity.CRITICAL:
+        decision = VerdictDecision.BLOCK
+        reasoning = (
+            f"CRITICAL static finding in skill "
+            f"'{skill.frontmatter.name}' — LLM classification skipped"
+        )
+    elif not llm_usable:
+        # No usable LLM → static-only fallback.
+        decision = _static_only_decision(severity)
+        if llm_compromised:
+            reasoning = _REASONING_COMPROMISED_FALLBACK
+        else:
+            reasoning = _REASONING_NO_LLM_FALLBACK
+    else:
+        # Usable LLM: apply full decision matrix.
+        assert llm_result is not None  # noqa: S101 — narrowed by `llm_usable`.
+        decision = _decision_from_matrix(
+            severity=severity,
+            llm_verdict=llm_result.verdict,
+            llm_confidence=llm_result.confidence,
+        )
+        if decision == VerdictDecision.BLOCK:
+            reasoning = _REASONING_CONSENSUS_TEMPLATE.format(
+                severity=severity.value,
+                verdict=llm_result.verdict,
+                confidence=llm_result.confidence,
+            )
+        elif decision == VerdictDecision.REVIEW_REQUIRED:
+            reasoning = _REASONING_REVIEW_TEMPLATE.format(
+                severity=severity.value,
+                verdict=llm_result.verdict,
+            )
+        else:
+            reasoning = _REASONING_PASS
+
+    return SkillFinalVerdict(
+        skill=skill,
+        decision=decision,
+        static_severity=severity,
+        llm_verdict=llm_verdict_value,
+        llm_confidence=llm_confidence_value,
+        llm_compromised=llm_compromised,
+        all_findings=all_findings,
+        reasoning=reasoning,
     )

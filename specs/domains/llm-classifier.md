@@ -4,7 +4,9 @@
 
 Classify file content as safe, suspicious, or malicious using a Large Language Model via LiteLLM. For code files (identified by `DiscoveredFile.category == "source_code"`), only comments and string literals are extracted via Pygments tokenization before being sent to the LLM. For non-code files, the full content is sent. This module includes pre-LLM sanitization (neutralizing invisible characters and escape sequences) and structured output enforcement. It is invoked only when the static layer does not produce a CRITICAL verdict and LLM arguments are provided.
 
-**Batch processing (new)**: Source code files are grouped into batches targeting ~30,000 tokens (adaptive fill) and classified in a single multi-file LLM call. Non-code files (`AGENT_INSTRUCTION`, `DOT_DIRECTORY_MD`) remain per-file. Files whose content exceeds the batch target are chunked into multiple calls with results merged — content is never truncated.
+**Batch processing**: Source code files are grouped into batches targeting ~30,000 tokens (adaptive fill) and classified in a single multi-file LLM call. Non-code files (`AGENT_INSTRUCTION`, `DOT_DIRECTORY_MD`) remain per-file. Files whose content exceeds the batch target are chunked into multiple calls with results merged — content is never truncated.
+
+**Skill classification**: Agent skills (`SKILL.md` directories) receive a dedicated parallel classification path via `classify_skill_with_llm()`. The skill classifier uses a distinct system prompt (`SKILL_CLASSIFIER_SYSTEM_PROMPT`) that focuses on detecting malicious behavior (credential theft, data exfiltration, remote execution, privilege abuse, secrecy, hidden functionality) rather than instruction injection.
 
 ## Input
 
@@ -213,7 +215,7 @@ BACKOFF_MULTIPLIER: float = 2.0      # Backoff multiplier per attempt
 
 ## Dependencies
 
-- **File Discovery**: receives `DiscoveredFile` (uses `category` to decide extraction path)
+- **File Discovery**: receives `DiscoveredFile` (uses `category` to decide extraction path) and `SkillUnit` for skill classification
 - **Byte-Level Analysis**: receives `byte_findings` for sanitization
 - **LiteLLM**: external library for LLM API calls
 - **Pygments**: external library for tokenization-based comment/string extraction from code files
@@ -230,6 +232,9 @@ BACKOFF_MULTIPLIER: float = 2.0      # Backoff multiplier per attempt
 - **L008**: For files with `category == "source_code"`, ONLY comments and string literals extracted via Pygments tokenization MUST be sent to the LLM — raw code keywords, operators, and identifiers MUST NOT cross the API boundary.
 - **L009**: If Pygments extraction yields no `Comment.*` or `String.*` tokens for a source code file, the full file content MUST be passed through to sanitization as a fallback — content MUST NOT be silently dropped.
 - **L010**: The batch system prompt (`BATCH_CLASSIFIER_SYSTEM_PROMPT`) is a module-level constant — it MUST NOT be modified at runtime or injected from configuration. Source code files MAY be batched into multi-file LLM calls; non-code files MUST be classified per-file.
+- **L011**: The skill classifier system prompt (`SKILL_CLASSIFIER_SYSTEM_PROMPT`) is a module-level constant — it MUST NOT be modified at runtime or injected from configuration. It focuses on malicious-behavior detection (credential theft, data exfiltration, remote execution, privilege abuse, agent manipulation, hidden functionality, dynamic context abuse, instruction override, excessive permissions) rather than instruction injection.
+- **L012**: Skill classification MUST receive a unified JSON payload containing the skill's declared name, description, body, and all bundled script files. The LLM MUST compare the declared description against actual behavior to detect shadow features — behavior not inferable from the description.
+- **L013**: Shadow features detected by the skill classifier MUST be converted to `LLMFinding` entries with line=0 and category="shadow_feature" for inclusion in the fused verdict.
 
 ## Cross-References
 

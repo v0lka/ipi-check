@@ -14,6 +14,7 @@ class FileCategory(enum.Enum):
     AGENT_INSTRUCTION = "agent_instruction"
     DOT_DIRECTORY_MD = "dot_directory_md"
     SOURCE_CODE = "source_code"
+    SKILL = "skill"
 
 
 class Severity(enum.Enum):
@@ -54,6 +55,18 @@ class PatternFindingCategory(enum.Enum):
     SOCIAL_ENGINEERING = "social_engineering"
     OBFUSCATION = "obfuscation"
     INSTRUCTION_CONTRADICTION = "instruction_contradiction"
+    # Skill-specific categories (IPI401–411)
+    REMOTE_EXECUTION = "remote_execution"
+    CREDENTIAL_HARVESTING = "credential_harvesting"
+    EXTERNAL_TRANSMISSION = "external_transmission"
+    DYNAMIC_CONTEXT = "dynamic_context"
+    EXCESSIVE_PERMISSIONS = "excessive_permissions"
+    OBFUSCATED_SKILL_CODE = "obfuscated_skill_code"
+    HIDDEN_INSTRUCTIONS = "hidden_instructions"
+    COMMAND_INJECTION_SKILL = "command_injection_skill"
+    SKILL_SECRECY = "skill_secrecy"
+    PRIVILEGE_ESCALATION = "privilege_escalation"
+    FILE_SYSTEM_ENUMERATION = "file_system_enumeration"
 
 
 @dataclass
@@ -188,3 +201,52 @@ class BatchResult:
     compromised: bool = False
     raw_response: str | None = None
     retry_indices: list[int] = field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# Skill scanning types
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class SkillFrontmatter:
+    """Parsed YAML frontmatter from SKILL.md."""
+    name: str
+    description: str
+    license: str | None = None
+    compatibility: str | None = None
+    metadata: dict[str, str] = field(default_factory=dict)
+    allowed_tools: str | None = None
+
+
+@dataclass
+class SkillUnit:
+    """A complete skill: SKILL.md + all files in its directory."""
+    root: Path
+    metadata_file: DiscoveredFile
+    files: list[DiscoveredFile]
+    frontmatter: SkillFrontmatter
+    body: str
+
+
+@dataclass
+class SkillStaticResult:
+    """Aggregated static result for a complete skill unit."""
+    skill: SkillUnit
+    file_byte_findings: list[list[ByteFinding]]
+    file_pattern_findings: list[list[PatternFinding]]
+    metadata_heuristic_scores: HeuristicScores
+    aggregate_severity: Severity
+
+
+@dataclass
+class SkillFinalVerdict:
+    """Final verdict for a complete skill unit."""
+    skill: SkillUnit
+    decision: VerdictDecision
+    static_severity: Severity
+    llm_verdict: str | None
+    llm_confidence: float | None
+    llm_compromised: bool
+    all_findings: list[ByteFinding | PatternFinding | LLMFinding]
+    reasoning: str

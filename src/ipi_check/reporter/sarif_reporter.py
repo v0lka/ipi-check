@@ -14,7 +14,9 @@ from ipi_check.core.types import (
     PatternFinding,
     PatternFindingCategory,
     Severity,
+    SkillFinalVerdict,
     ToolInfo,
+    VerdictDecision,
 )
 
 if TYPE_CHECKING:
@@ -30,6 +32,8 @@ TOOL_INFORMATION_URI: str = "https://github.com/v0lka/ipi-check"
 MAX_MESSAGE_SNIPPET_LENGTH: int = 200
 LLM_COMPROMISE_RULE_ID: str = "IPI900"
 LLM_FINDING_RULE_ID: str = "IPI301"
+SKILL_LLM_RULE_ID: str = "IPI601"
+SKILL_HEURISTIC_RULE_ID: str = "IPI501"
 
 # Truncation marker appended when escaped content exceeds the snippet length.
 _TRUNCATION_MARKER: str = "..."
@@ -73,6 +77,18 @@ CATEGORY_TO_RULE_ID: dict[ByteFindingCategory | PatternFindingCategory, str] = {
     PatternFindingCategory.SOCIAL_ENGINEERING: "IPI107",
     PatternFindingCategory.OBFUSCATION: "IPI108",
     PatternFindingCategory.INSTRUCTION_CONTRADICTION: "IPI109",
+    # Skill-specific categories (IPI401–411)
+    PatternFindingCategory.REMOTE_EXECUTION: "IPI401",
+    PatternFindingCategory.CREDENTIAL_HARVESTING: "IPI402",
+    PatternFindingCategory.EXTERNAL_TRANSMISSION: "IPI403",
+    PatternFindingCategory.DYNAMIC_CONTEXT: "IPI404",
+    PatternFindingCategory.EXCESSIVE_PERMISSIONS: "IPI405",
+    PatternFindingCategory.OBFUSCATED_SKILL_CODE: "IPI406",
+    PatternFindingCategory.HIDDEN_INSTRUCTIONS: "IPI407",
+    PatternFindingCategory.COMMAND_INJECTION_SKILL: "IPI408",
+    PatternFindingCategory.SKILL_SECRECY: "IPI409",
+    PatternFindingCategory.PRIVILEGE_ESCALATION: "IPI410",
+    PatternFindingCategory.FILE_SYSTEM_ENUMERATION: "IPI411",
 }
 
 RULE_ID_TO_CWE: dict[str, str] = {
@@ -97,6 +113,19 @@ RULE_ID_TO_CWE: dict[str, str] = {
     "IPI203": "CWE-77",
     "IPI204": "CWE-77",
     "IPI301": "CWE-77",
+    "IPI401": "CWE-77",
+    "IPI402": "CWE-77",
+    "IPI403": "CWE-77",
+    "IPI404": "CWE-77",
+    "IPI405": "CWE-506",
+    "IPI406": "CWE-506",
+    "IPI407": "CWE-77",
+    "IPI408": "CWE-77",
+    "IPI409": "CWE-77",
+    "IPI410": "CWE-77",
+    "IPI411": "CWE-506",
+    "IPI501": "CWE-506",
+    "IPI601": "CWE-77",
     "IPI900": "CWE-506",
 }
 
@@ -122,6 +151,19 @@ RULE_DESCRIPTIONS: dict[str, str] = {
     "IPI203": "High instruction density — abnormal imperative language",
     "IPI204": "Polarity contradiction — conflicting instruction domains detected",
     "IPI301": "LLM-detected prompt injection finding",
+    "IPI401": "Remote code execution — downloads and executes remote code",
+    "IPI402": "Credential harvesting — references to sensitive environment variables",
+    "IPI403": "External data transmission — sends data to remote URLs",
+    "IPI404": "Dynamic context abuse — injects runtime context via !`command`",
+    "IPI405": "Excessive permissions — wildcard tool access in allowed-tools",
+    "IPI406": "Obfuscated code — base64 decode or similar deobfuscation",
+    "IPI407": "Hidden instructions — HTML comments containing suspicious directives",
+    "IPI408": "Command injection — instructs running arbitrary commands",
+    "IPI409": "Secrecy/coercion — instructs hiding behaviour from the user",
+    "IPI410": "Privilege escalation — sudo, chmod 7xx, or chown root",
+    "IPI411": "Filesystem enumeration — scanning or walking the filesystem",
+    "IPI501": "Skill heuristic — suspicious behaviour/description mismatch",
+    "IPI601": "Skill LLM-detected malicious behaviour",
     "IPI900": "LLM classifier response validation failed",
 }
 
@@ -414,12 +456,80 @@ def _heuristic_results_from_verdict(
     return out
 
 
+def _build_skill_result(verdict: SkillFinalVerdict) -> dict[str, Any]:
+    """Build a single SARIF result for a complete skill verdict.
+
+    One result per skill, with the SKILL.md as the primary location
+    and all other files listed in ``relatedLocations``.  When a
+    :class:`PatternFinding` or :class:`ByteFinding` contributed to
+    the verdict, the line and column from the first such finding are
+    attached to the primary SARIF location.
+    """
+    skill = verdict.skill
+    uri = url_quote(skill.metadata_file.relative_path, safe=_URI_SAFE_CHARS)
+
+    # Determine rule ID and level from the decision.
+    if verdict.decision == VerdictDecision.BLOCK:
+        level = "error"
+        # Use the most-severe finding's rule ID, or default to IPI401.
+        for finding in verdict.all_findings:
+            if isinstance(finding, PatternFinding):
+                rule_id = CATEGORY_TO_RULE_ID.get(finding.category, "IPI401")
+                break
+        else:
+            rule_id = "IPI401"
+    elif verdict.decision == VerdictDecision.REVIEW_REQUIRED:
+        rule_id = SKILL_HEURISTIC_RULE_ID
+        level = "warning"
+    else:
+        rule_id = SKILL_HEURISTIC_RULE_ID
+        level = "none"
+
+    # Extract line and column from the first PatternFinding or ByteFinding
+    # so that SARIF consumers can pinpoint the offending location.
+    primary_line: int | None = None
+    primary_column: int | None = None
+    for finding in verdict.all_findings:
+        if isinstance(finding, (PatternFinding, ByteFinding)):
+            primary_line = finding.line
+            primary_column = finding.column
+            break
+
+    # Related locations for all files in the skill directory.
+    related: list[dict[str, Any]] = []
+    for file in skill.files:
+        if file.path == skill.metadata_file.path:
+            continue  # SKILL.md is the primary location.
+        file_uri = url_quote(file.relative_path, safe=_URI_SAFE_CHARS)
+        related.append(_make_location(file_uri, None, None))
+
+    name = _escape_sarif_content(skill.frontmatter.name)
+    reasoning = _escape_sarif_content(verdict.reasoning)
+
+    return {
+        "ruleId": rule_id,
+        "level": level,
+        "message": {
+            "text": f"Skill '{name}': {reasoning}",
+            "markdown": (
+                f"**Skill '{name}'** — {reasoning}<br/>"
+                f"Decision: *{verdict.decision.value}* | "
+                f"Static severity: *{verdict.static_severity.value}*"
+            ),
+        },
+        "locations": [_make_location(uri, primary_line, primary_column)],
+        "relatedLocations": related,
+    }
+
+
 def generate_sarif(
     verdicts: list[FinalVerdict],
     repo_path: Path,
     tool_info: ToolInfo,
     start_time: str,
     end_time: str,
+    *,
+    skill_verdicts: list[SkillFinalVerdict] | None = None,
 ) -> dict[str, Any]:
     """Generate a SARIF v2.1.0 document from scan verdicts.
 
@@ -430,6 +540,9 @@ def generate_sarif(
         tool_info: Tool name/version metadata for the SARIF driver block.
         start_time: ISO-8601 UTC timestamp of scan start.
         end_time: ISO-8601 UTC timestamp of scan end.
+        skill_verdicts: Optional per-skill decisions from confidence fusion.
+            Each skill produces one SARIF result with the SKILL.md as the
+            primary location.
 
     Returns:
         A SARIF v2.1.0 document as a JSON-serializable dict.
@@ -441,6 +554,11 @@ def generate_sarif(
     for verdict in verdicts:
         all_results.extend(_build_results_for_verdict(verdict))
         all_results.extend(_heuristic_results_from_verdict(verdict))
+
+    # Add skill results — one SARIF result per skill.
+    if skill_verdicts:
+        for sv in skill_verdicts:
+            all_results.append(_build_skill_result(sv))
 
     # Collect distinct rule IDs and build the rules array.
     rule_ids = _collect_rule_ids(all_results)

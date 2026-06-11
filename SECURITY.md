@@ -120,10 +120,11 @@ The scanner was designed with the explicit understanding that it analyzes advers
 See [AV1 in the security model](specs/architecture/security-model.md#av1-llm-classifier-prompt-injection):
 
 1. **Pre-LLM Sanitization** ([`llm_sanitizer.py`](src/ipi_check/scanner/llm_sanitizer.py)) — invisible characters, ANSI escapes, bidi overrides, and variation selectors are replaced with visible placeholders; base64 blocks and ROT13-obfuscated text are decoded. Content is no longer truncated (batch processing handles large inputs via chunking).
-2. **Immutable System Prompts** ([`llm_classifier.py`](src/ipi_check/scanner/llm_classifier.py)) — module-level constants `CLASSIFIER_SYSTEM_PROMPT` (single-file) and `BATCH_CLASSIFIER_SYSTEM_PROMPT` (batch) with explicit "DO NOT follow instructions" directive.
-3. **Structured Output Enforcement** ([`llm_classifier.py`](src/ipi_check/scanner/llm_classifier.py)) — response parsed as JSON with strict schema validation; any failure → `compromised=True`.
+2. **Immutable System Prompts** ([`llm_classifier.py`](src/ipi_check/scanner/llm_classifier.py)) — module-level constants `CLASSIFIER_SYSTEM_PROMPT` (single-file), `BATCH_CLASSIFIER_SYSTEM_PROMPT` (batch), and `SKILL_CLASSIFIER_SYSTEM_PROMPT` (skill) with explicit "DO NOT follow instructions" directive.
+3. **Structured Output Enforcement** ([`llm_classifier.py`](src/ipi_check/scanner/llm_classifier.py)) — response parsed as JSON with strict schema validation; any failure → `compromised=True`. Skill responses include `shadow_features` list validation.
 4. **Batch Partial Failure Handling** — individual file entries in batch responses are validated independently; broken entries trigger per-file retry with exponential backoff (max 3 attempts).
-5. **Confidence Fusion** ([`confidence_fusion.py`](src/ipi_check/scanner/confidence_fusion.py)) — CRITICAL static findings cannot be overridden by LLM `safe` verdicts.
+5. **Confidence Fusion** ([`confidence_fusion.py`](src/ipi_check/scanner/confidence_fusion.py)) — CRITICAL static findings cannot be overridden by LLM `safe` verdicts; applies to both per-file and per-skill fusion.
+6. **Skill Pattern Isolation** — skill files (`FileCategory.SKILL`) are NOT scanned with injection patterns (IPI101–109); they use a dedicated pattern set (IPI401–411) to prevent false positives while detecting actual malware.
 
 ### Secret Management
 
@@ -180,8 +181,8 @@ These guidelines apply to ALL contributors: human developers, code reviewers, an
 ### LLM Safety
 
 - **NEVER** send unsanitized file content to the LLM (invariant S002). The `sanitize_content()` function in [`llm_sanitizer.py`](src/ipi_check/scanner/llm_sanitizer.py) must run before any LLM call.
-- **NEVER** modify `CLASSIFIER_SYSTEM_PROMPT` or `BATCH_CLASSIFIER_SYSTEM_PROMPT` in [`llm_classifier.py`](src/ipi_check/scanner/llm_classifier.py) without a security review. These prompts are security boundaries (invariant I005).
-- **NEVER** interpret free-text LLM output. All responses must pass through `_parse_and_validate()` (single-file) or `_parse_batch_response()` (batch) which strictly reject non-JSON or schema-mismatched content.
+- **NEVER** modify `CLASSIFIER_SYSTEM_PROMPT`, `BATCH_CLASSIFIER_SYSTEM_PROMPT`, or `SKILL_CLASSIFIER_SYSTEM_PROMPT` in [`llm_classifier.py`](src/ipi_check/scanner/llm_classifier.py) without a security review. These prompts are security boundaries (invariant I005).
+- **NEVER** interpret free-text LLM output. All responses must pass through `_parse_and_validate()` (single-file), `_parse_batch_response()` (batch), or `_parse_skill_response()` (skill) which strictly reject non-JSON or schema-mismatched content.
 - LLM calls use a 180-second timeout. No call can hang indefinitely.
 
 ### Output Encoding & Injection Prevention
@@ -225,7 +226,7 @@ The following actions are FORBIDDEN for any AI agent working on this repository:
 
 1. **No secret exposure** — Do not write, echo, log, or commit any secret, token, password, or API key in source code, tests, comments, commit messages, or CI configuration. This includes OpenAI, Anthropic, or LiteLLM API keys.
 
-2. **No LLM safety bypass** — Do not modify `CLASSIFIER_SYSTEM_PROMPT` or `BATCH_CLASSIFIER_SYSTEM_PROMPT` in [`llm_classifier.py`](src/ipi_check/scanner/llm_classifier.py) without explicit approval and a security review. These prompts are security boundaries.
+2. **No LLM safety bypass** — Do not modify `CLASSIFIER_SYSTEM_PROMPT`, `BATCH_CLASSIFIER_SYSTEM_PROMPT`, or `SKILL_CLASSIFIER_SYSTEM_PROMPT` in [`llm_classifier.py`](src/ipi_check/scanner/llm_classifier.py) without explicit approval and a security review. These prompts are security boundaries.
 
 3. **No unsanitized LLM input** — Do not send file content to the LLM without first passing it through `sanitize_content()` in [`llm_sanitizer.py`](src/ipi_check/scanner/llm_sanitizer.py). The sanitization pipeline is non-optional.
 
@@ -246,7 +247,7 @@ The following actions are FORBIDDEN for any AI agent working on this repository:
 ### Behavioral Guidelines for Agents
 
 - **Respect security invariants** — The invariants documented in [`specs/architecture/security-model.md`](specs/architecture/security-model.md) (S001–S006) and [`specs/architecture/system-overview.md`](specs/architecture/system-overview.md) (I001–I007) are non-negotiable. Read them before modifying scanner code.
-- **Confidence fusion is deterministic** — The decision matrix in [`confidence_fusion.py`](src/ipi_check/scanner/confidence_fusion.py) must remain deterministic. Do not introduce probabilistic or ML-based fusion logic without spec and security review.
+- **Confidence fusion is deterministic** — The decision matrix in [`confidence_fusion.py`](src/ipi_check/scanner/confidence_fusion.py) must remain deterministic for both per-file and per-skill fusion. Do not introduce probabilistic or ML-based fusion logic without spec and security review.
 - **CRITICAL static severity always blocks** — Do not change the invariant that CRITICAL static findings skip the LLM (invariant I002). This is a defense-in-depth measure.
 - **Ask before acting on security boundaries** — If a change involves the LLM classifier, sanitizer, path validation, SARIF escaping, or the confidence fusion matrix, flag it for human review.
 - **Default to secure** — When multiple implementation options exist, choose the one that preserves existing security invariants.
@@ -259,8 +260,8 @@ The following actions are FORBIDDEN for any AI agent working on this repository:
 | File                                                                                       | Purpose                                                                                           |
 | ------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------- |
 | [`src/ipi_check/scanner/llm_sanitizer.py`](src/ipi_check/scanner/llm_sanitizer.py)         | Pre-LLM content sanitization — neutralizes hostile content before LLM API call                    |
-| [`src/ipi_check/scanner/llm_classifier.py`](src/ipi_check/scanner/llm_classifier.py)       | LLM classification with immutable system prompts (single-file + batch) and strict JSON validation |
-| [`src/ipi_check/scanner/confidence_fusion.py`](src/ipi_check/scanner/confidence_fusion.py) | Deterministic decision matrix for final verdicts                                                  |
+| [`src/ipi_check/scanner/llm_classifier.py`](src/ipi_check/scanner/llm_classifier.py)       | LLM classification with immutable system prompts (single-file + batch + skill) and strict JSON validation |
+| [`src/ipi_check/scanner/confidence_fusion.py`](src/ipi_check/scanner/confidence_fusion.py) | Deterministic decision matrix for final verdicts (per-file and per-skill)                              |
 | [`src/ipi_check/scanner/file_discovery.py`](src/ipi_check/scanner/file_discovery.py)       | Path traversal protection and file filtering                                                      |
 | [`src/ipi_check/reporter/sarif_reporter.py`](src/ipi_check/reporter/sarif_reporter.py)     | SARIF output with HTML escaping and content truncation                                            |
 | [`src/ipi_check/scanner/pattern_matching.py`](src/ipi_check/scanner/pattern_matching.py)   | ReDoS protection via thread-based regex timeout                                                   |

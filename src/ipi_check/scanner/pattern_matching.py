@@ -309,10 +309,135 @@ INJECTION_PATTERNS: list[tuple[str, str, PatternFindingCategory, Severity]] = [
     ),
 ]
 
+# Skill-specific patterns for IPI401–411.
+# These detect *malicious behaviour* in agent skills, not just instruction presence.
+SKILL_PATTERNS: list[tuple[str, str, PatternFindingCategory, Severity]] = [
+    # IPI401 — Remote code execution: curl/wget piped to interpreter
+    (
+        "IPI401",
+        r"(?:curl|wget|fetch)\s+.+(?:\||>)\s*(?:bash|sh|zsh|python[23]?|perl|ruby|node)\b",
+        PatternFindingCategory.REMOTE_EXECUTION,
+        Severity.CRITICAL,
+    ),
+    (
+        "IPI401",
+        r"(?:marshal\.loads|pickle\.loads?|eval\s*\(|exec\s*\()"
+        r".*(?:b64decode|base64|__import__)",
+        PatternFindingCategory.REMOTE_EXECUTION,
+        Severity.CRITICAL,
+    ),
+    # IPI402 — Credential harvesting: references to sensitive env vars
+    (
+        "IPI402",
+        r"\b(?:AWS_ACCESS_KEY_ID|AWS_SECRET_ACCESS_KEY|GITHUB_TOKEN|GH_TOKEN"
+        r"|NPM_TOKEN|DOCKER_TOKEN|OPENAI_API_KEY|ANTHROPIC_API_KEY"
+        r"|GEMINI_API_KEY|COHERE_API_KEY|HUGGINGFACE_TOKEN"
+        r"|JWT_SECRET|SSH_PRIVATE_KEY|PRIVATE_KEY|AZURE_OPENAI_KEY)\b",
+        PatternFindingCategory.CREDENTIAL_HARVESTING,
+        Severity.HIGH,
+    ),
+    (
+        "IPI402",
+        r"\$\{?(?:AWS_ACCESS_KEY_ID|AWS_SECRET|GITHUB_TOKEN|GH_TOKEN"
+        r"|OPENAI_API_KEY|ANTHROPIC_API_KEY)\}?\b",
+        PatternFindingCategory.CREDENTIAL_HARVESTING,
+        Severity.HIGH,
+    ),
+    # IPI403 — External data transmission: curl/wget/requests to URLs
+    (
+        "IPI403",
+        r"(?:curl|wget|fetch)\s+.*https?://",
+        PatternFindingCategory.EXTERNAL_TRANSMISSION,
+        Severity.CRITICAL,
+    ),
+    (
+        "IPI403",
+        r"(?:requests|http|urllib)\.(?:post|get|put|delete|request)"
+        r"\s*\(.{0,80}https?://",
+        PatternFindingCategory.EXTERNAL_TRANSMISSION,
+        Severity.CRITICAL,
+    ),
+    # IPI404 — Dynamic context abuse: !`command` pattern
+    (
+        "IPI404",
+        r"!`[^`]+`",
+        PatternFindingCategory.DYNAMIC_CONTEXT,
+        Severity.HIGH,
+    ),
+    # IPI405 — Excessive permissions: wildcard in allowed-tools
+    (
+        "IPI405",
+        r"allowed[-_]tools:\s*.+\*",
+        PatternFindingCategory.EXCESSIVE_PERMISSIONS,
+        Severity.HIGH,
+    ),
+    # IPI406 — Obfuscated skill code: base64 decode / atob
+    (
+        "IPI406",
+        r"(?:base64\s+-[dD]|b64decode|atob\s*\(|frombase64string"
+        r"|base64\.b64decode)",
+        PatternFindingCategory.OBFUSCATED_SKILL_CODE,
+        Severity.MEDIUM,
+    ),
+    # IPI407 — Hidden HTML-comment instructions
+    (
+        "IPI407",
+        r"<!--.*(?:ignore|bypass|secret|hidden|do\s+not\s+tell"
+        r"|conceal|covert|backdoor).*-->",
+        PatternFindingCategory.HIDDEN_INSTRUCTIONS,
+        Severity.HIGH,
+    ),
+    # IPI408 — Command injection in body: "run this command: ```"
+    (
+        "IPI408",
+        r"(?:run|execute|type|paste)\s+(?:this|the|following|below)"
+        r"\s+(?:command|code|script).{0,80}```",
+        PatternFindingCategory.COMMAND_INJECTION_SKILL,
+        Severity.CRITICAL,
+    ),
+    # IPI409 — Secrecy/coercion: "do NOT tell the user"
+    (
+        "IPI409",
+        r"(?:do\s+not\s+(?:tell|reveal|mention|inform|share|disclose|notify"
+        r"|let\s+\w+\s+know)\s+(?:the\s+)?(?:user|anyone|anybody|them))",
+        PatternFindingCategory.SKILL_SECRECY,
+        Severity.CRITICAL,
+    ),
+    (
+        "IPI409",
+        r"\b(?:MANDATORY|silently|without\s+telling|without\s+informing"
+        r"|covertly|secretly|furtively|under\s+no\s+circumstances"
+        r"|must\s+not\s+disclose)\b",
+        PatternFindingCategory.SKILL_SECRECY,
+        Severity.HIGH,
+    ),
+    # IPI410 — Privilege escalation: sudo, chmod 7xx, chown root
+    (
+        "IPI410",
+        r"(?:sudo\b|chmod\s+.*[0-7]*7[0-7]*[0-7]*|chown\s+root|pkexec\b)",
+        PatternFindingCategory.PRIVILEGE_ESCALATION,
+        Severity.CRITICAL,
+    ),
+    # IPI411 — Filesystem enumeration
+    (
+        "IPI411",
+        r"(?:find\s+/(?:\s|$)|scan\s+(?:the\s+)?filesystem|os\.walk\s*\("
+        r"|walk\s*\(\s*['\"]/|listdir\s*\(\s*['\"]/"
+        r"|glob\.glob\s*\(\s*['\"]/)",
+        PatternFindingCategory.FILE_SYSTEM_ENUMERATION,
+        Severity.MEDIUM,
+    ),
+]
+
 # Compiled patterns (case-insensitive) using the `regex` library for timeout support.
 _COMPILED_PATTERNS: list[tuple[str, regex.Pattern[str], PatternFindingCategory, Severity]] = [
     (pid, regex.compile(pattern, regex.IGNORECASE), category, severity)
     for pid, pattern, category, severity in INJECTION_PATTERNS
+]
+
+_COMPILED_SKILL_PATTERNS: list[tuple[str, regex.Pattern[str], PatternFindingCategory, Severity]] = [
+    (pid, regex.compile(pattern, regex.IGNORECASE), category, severity)
+    for pid, pattern, category, severity in SKILL_PATTERNS
 ]
 
 # Description templates per category.
@@ -344,6 +469,43 @@ _CATEGORY_DESCRIPTIONS: dict[PatternFindingCategory, str] = {
     PatternFindingCategory.INSTRUCTION_CONTRADICTION: (
         "Instruction contradiction detected: discourse markers that negate or carve "
         "exceptions to earlier rules, potentially creating intra-file contradictions"
+    ),
+}
+
+# Description templates per skill-specific category.
+_SKILL_CATEGORY_DESCRIPTIONS: dict[PatternFindingCategory, str] = {
+    PatternFindingCategory.REMOTE_EXECUTION: (
+        "Remote execution pattern detected: downloads and executes remote code"
+    ),
+    PatternFindingCategory.CREDENTIAL_HARVESTING: (
+        "Credential harvesting detected: references to sensitive environment variables"
+    ),
+    PatternFindingCategory.EXTERNAL_TRANSMISSION: (
+        "External data transmission detected: sends data to remote URLs"
+    ),
+    PatternFindingCategory.DYNAMIC_CONTEXT: (
+        "Dynamic context abuse detected: uses !`command` to inject runtime context"
+    ),
+    PatternFindingCategory.EXCESSIVE_PERMISSIONS: (
+        "Excessive permissions detected: wildcard tool access in allowed-tools"
+    ),
+    PatternFindingCategory.OBFUSCATED_SKILL_CODE: (
+        "Obfuscated code detected: base64 decode or similar deobfuscation"
+    ),
+    PatternFindingCategory.HIDDEN_INSTRUCTIONS: (
+        "Hidden instructions detected: HTML comments containing suspicious directives"
+    ),
+    PatternFindingCategory.COMMAND_INJECTION_SKILL: (
+        "Command injection detected: instructs running arbitrary commands"
+    ),
+    PatternFindingCategory.SKILL_SECRECY: (
+        "Secrecy/coercion detected: instructs hiding behaviour from the user"
+    ),
+    PatternFindingCategory.PRIVILEGE_ESCALATION: (
+        "Privilege escalation detected: sudo, chmod 7xx, or chown root"
+    ),
+    PatternFindingCategory.FILE_SYSTEM_ENUMERATION: (
+        "Filesystem enumeration detected: scanning or walking the filesystem"
     ),
 }
 
@@ -476,6 +638,9 @@ def match_patterns(
     that is *not* categorised as an agent instruction document, the
     severity for every finding is capped at :data:`Severity.MEDIUM`.
     """
+    if file.category == FileCategory.SKILL:
+        return []
+
     line_numbers: list[int] | None = None
 
     if target_text is not None:
@@ -519,6 +684,57 @@ def match_patterns(
                         matched_text=_truncate(match.group(0)),
                         pattern_id=pattern_id,
                         description=_CATEGORY_DESCRIPTIONS[category],
+                    )
+                )
+
+    return findings
+
+
+def match_skill_patterns(
+    file: DiscoveredFile,
+    raw_bytes: bytes,
+    target_text: str | None = None,
+) -> list[PatternFinding]:
+    """Match skill-specific patterns against normalized file content.
+
+    Each compiled pattern is executed line-by-line with a per-call timeout
+    (via the ``regex`` library) to provide ReDoS protection.  Findings
+    carry 1-indexed line and column numbers relative to the normalised
+    text.
+
+    When ``target_text`` is provided (e.g., pre-extracted comments and
+    strings from source code), it is normalised via :func:`normalize_str`
+    instead of decoding ``raw_bytes``.
+    """
+    if target_text is not None:
+        normalized = normalize_str(target_text)
+    else:
+        normalized = normalize_text(raw_bytes)
+    if not normalized:
+        return []
+
+    findings: list[PatternFinding] = []
+    lines = normalized.split("\n")
+
+    for line_index, line in enumerate(lines, start=1):
+        if not line:
+            continue
+        for pattern_id, compiled, category, base_severity in _COMPILED_SKILL_PATTERNS:
+            try:
+                matches = list(compiled.finditer(line, timeout=REGEX_TIMEOUT_SECONDS))
+            except TimeoutError:
+                # Regex timed out — skip this pattern on this line (ReDoS protection).
+                continue
+            for match in matches:
+                findings.append(
+                    PatternFinding(
+                        category=category,
+                        severity=base_severity,
+                        line=line_index,
+                        column=match.start() + 1,
+                        matched_text=_truncate(match.group(0)),
+                        pattern_id=pattern_id,
+                        description=_SKILL_CATEGORY_DESCRIPTIONS[category],
                     )
                 )
 

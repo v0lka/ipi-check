@@ -12,23 +12,23 @@ ipi-check scan <repo_path> [OPTIONS]
 
 ### Positional Arguments
 
-| Argument | Required | Type | Description |
-|----------|----------|------|-------------|
-| `repo_path` | Yes | `Path` | Path to the repository to scan. Must be an existing directory. |
+| Argument    | Required | Type   | Description                                                    |
+| ----------- | -------- | ------ | -------------------------------------------------------------- |
+| `repo_path` | Yes      | `Path` | Path to the repository to scan. Must be an existing directory. |
 
 ### Options
 
-| Option | Required | Type | Default | Description |
-|--------|----------|------|---------|-------------|
-| `--llm-base-url` | No | `str` | `None` | LiteLLM base URL. If not set, LiteLLM uses its default (from environment or built-in config). |
-| `--llm-model` | No | `str` | `None` | LLM model name (e.g., `gpt-4o-mini`, `claude-3-haiku-20240307`). If not set, LiteLLM uses its default. |
-| `--llm-api-token` | No | `str` | `None` | API token for the LLM provider. If not set, LiteLLM uses its default auth chain. |
-| `--output` | No | `Path` | stdout | Path to write the SARIF report file. If not set, the report is printed to stdout. |
-| `--quiet` | No | `flag` | `False` | Suppress progress and informational output. Only the SARIF report is emitted. |
-| `--no-gitignore` | No | `flag` | `False` | Disable .gitignore-aware file exclusion. By default, files matching .gitignore patterns are skipped. |
-| `--exclude` | No | `str` (repeatable) | `None` | Glob pattern (gitignore/gitwildmatch syntax) to exclude from scanning. Can be specified multiple times. |
-| `--version` | No | `flag` | — | Print the tool version and exit. |
-| `--help` | No | `flag` | — | Print help message and exit. |
+| Option            | Required | Type               | Default | Description                                                                                             |
+| ----------------- | -------- | ------------------ | ------- | ------------------------------------------------------------------------------------------------------- |
+| `--llm-base-url`  | No       | `str`              | `None`  | LiteLLM base URL. If not set, LiteLLM uses its default (from environment or built-in config).           |
+| `--llm-model`     | No       | `str`              | `None`  | LLM model name (e.g., `gpt-4o-mini`, `claude-3-haiku-20240307`). If not set, LiteLLM uses its default.  |
+| `--llm-api-token` | No       | `str`              | `None`  | API token for the LLM provider. If not set, LiteLLM uses its default auth chain.                        |
+| `--output`        | No       | `Path`             | stdout  | Path to write the SARIF report file. If not set, the report is printed to stdout.                       |
+| `--quiet`         | No       | `flag`             | `False` | Suppress progress and informational output. Only the SARIF report is emitted.                           |
+| `--no-gitignore`  | No       | `flag`             | `False` | Disable .gitignore-aware file exclusion. By default, files matching .gitignore patterns are skipped.    |
+| `--exclude`       | No       | `str` (repeatable) | `None`  | Glob pattern (gitignore/gitwildmatch syntax) to exclude from scanning. Can be specified multiple times. |
+| `--version`       | No       | `flag`             | —       | Print the tool version and exit.                                                                        |
+| `--help`          | No       | `flag`             | —       | Print help message and exit.                                                                            |
 
 ### Environment Variable Expansion
 
@@ -39,6 +39,7 @@ ipi-check scan ./repo --llm-api-token '${OPENAI_API_KEY}' --llm-model '${LLM_MOD
 ```
 
 Rules:
+
 - The syntax `${VAR_NAME}` is expanded at parse time by the CLI argument parser.
 - Undefined variables (no matching environment variable) are replaced with an empty string.
 - If `--llm-api-token` expands to an empty string and no `LITELLM_API_KEY` environment variable is set, LLM is disabled (Case 1 only).
@@ -82,44 +83,47 @@ ipi-check scan /path/to/repo --exclude "*.log" --exclude "vendor/"
 ### LLM Availability Detection
 
 LLM is enabled if ANY of these conditions is true:
+
 - `--llm-api-token` is provided (directly or via env expansion)
 - `LITELLM_API_KEY` environment variable is set
 - `OPENAI_API_KEY` environment variable is set
 - `ANTHROPIC_API_KEY` environment variable is set
 
 If none of these conditions are met:
+
 - Print informational message to stderr: "LLM not configured — running static analysis only"
 - Run Case 1 only (skip LLM classifier)
 
 ## Error Handling
 
-| Condition | Exit Code | stderr Message |
-|-----------|-----------|----------------|
-| `repo_path` does not exist | 2 | `Error: Repository path not found: {path}` |
-| `repo_path` is a file | 2 | `Error: Expected a directory: {path}` |
-| `--output` parent directory does not exist | 2 | `Error: Output directory not found: {dir}` |
-| `--output` file cannot be written | 1 | `Error: Cannot write to output file: {path}` |
-| LLM API call fails (network, auth) | 0 | Warning to stderr: "LLM API error: {msg} — falling back to static analysis" |
-| LLM API call times out | 0 | Warning to stderr: "LLM API timeout — falling back to static analysis" |
-| Unhandled exception | 1 | `Error: Internal error: {exception}` with traceback to stderr |
-| `--help` flag | 0 | Print help and exit |
-| `--version` flag | 0 | Print `ipi-check {version}` and exit |
-| No arguments at all | 2 | Print usage and exit |
+| Condition                                  | Exit Code | stderr Message                                                              |
+| ------------------------------------------ | --------- | --------------------------------------------------------------------------- |
+| `repo_path` does not exist                 | 2         | `Error: Repository path not found: {path}`                                  |
+| `repo_path` is a file                      | 2         | `Error: Expected a directory: {path}`                                       |
+| `--output` parent directory does not exist | 2         | `Error: Output directory not found: {dir}`                                  |
+| `--output` file cannot be written          | 1         | `Error: Cannot write to output file: {path}`                                |
+| LLM API call fails (network, auth)         | 0         | Warning to stderr: "LLM API error: {msg} — falling back to static analysis" |
+| LLM API call times out                     | 0         | Warning to stderr: "LLM API timeout — falling back to static analysis"      |
+| Unhandled exception                        | 1         | `Error: Internal error: {exception}` with traceback to stderr               |
+| `--help` flag                              | 0         | Print help and exit                                                         |
+| `--version` flag                           | 0         | Print `ipi-check {version}` and exit                                        |
+| No arguments at all                        | 2         | Print usage and exit                                                        |
 
 ### Exit Code Semantics
 
-| Code | Meaning |
-|------|---------|
-| 0 | Scan completed successfully (regardless of findings — BLOCK findings do NOT cause non-zero exit) |
-| 1 | Runtime error (file I/O error, unhandled exception) |
-| 2 | Usage error (invalid arguments) |
+| Code | Meaning                                                                                          |
+| ---- | ------------------------------------------------------------------------------------------------ |
+| 0    | Scan completed successfully (regardless of findings — BLOCK findings do NOT cause non-zero exit) |
+| 1    | Runtime error (file I/O error, unhandled exception)                                              |
+| 2    | Usage error (invalid arguments)                                                                  |
 
 ## Examples
 
 ### Basic scan (Case 1 only — no LLM)
+
 ```bash
 $ ipi-check scan ./my-project
-ipi-check 0.1.0 — Prompt Injection Scanner
+ipi-check 0.1.0 — Prompt injection and skills security scanner
 
 Scanning ./my-project...
 Discovered 47 files to scan
@@ -139,22 +143,26 @@ SARIF report written to stdout
 ```
 
 ### Scan with LLM
+
 ```bash
 $ ipi-check scan ./my-project --llm-model gpt-4o-mini --llm-api-token "${OPENAI_API_KEY}"
 ```
 
 ### Scan with output file
+
 ```bash
 $ ipi-check scan ./my-project --output results.sarif
 ```
 
 ### Quiet mode for scripting
+
 ```bash
 $ ipi-check scan ./my-project --quiet | jq '.runs[0].results | length'
 42
 ```
 
 ### Exclude patterns
+
 ```bash
 # Skip vendored code and logs
 $ ipi-check scan ./my-project --exclude "vendor/" --exclude "*.log"
@@ -164,6 +172,7 @@ $ ipi-check scan ./my-project --no-gitignore
 ```
 
 ### Docker usage
+
 ```bash
 $ docker run -v $(pwd):/repo ipi-check scan /repo --llm-api-token "${OPENAI_API_KEY}"
 ```
@@ -181,6 +190,7 @@ $ docker run -v $(pwd):/repo ipi-check scan /repo --llm-api-token "${OPENAI_API_
 ## Breaking Change Checklist
 
 Any of the following constitutes a CLI breaking change:
+
 - [ ] Renaming or removing `scan` subcommand
 - [ ] Renaming `repo_path` argument
 - [ ] Changing `--llm-base-url`, `--llm-model`, `--llm-api-token`, or `--output` flag names

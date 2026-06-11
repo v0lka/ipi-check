@@ -2,7 +2,7 @@
 
 ## Responsibility
 
-Locate all files in a repository that may contain indirect prompt injection payloads — both AI agent instruction files (`.cursorrules`, `AGENTS.md`, etc.) and general source code files that could embed injection strings as literals.
+Locate all files in a repository that may contain indirect prompt injection payloads or malicious agent skills — both AI agent instruction files (`.cursorrules`, `AGENTS.md`, etc.), agent skills (directories containing `SKILL.md`), and general source code files that could embed injection strings as literals.
 
 ## Input
 
@@ -16,15 +16,33 @@ Locate all files in a repository that may contain indirect prompt injection payl
 
 | Field | Type | Consumers | Description |
 |-------|------|-----------|-------------|
-| `files` | `List[DiscoveredFile]` | Byte-Level Analysis | List of files to scan, each annotated with category |
+| `non_skill_files` | `List[DiscoveredFile]` | Byte-Level Analysis | List of non-skill files to scan, each annotated with category |
+| `skill_units` | `List[SkillUnit]` | Skill Static Analysis | Complete skill units discovered from `SKILL.md` directories |
 
 ```python
 @dataclass
 class DiscoveredFile:
     path: Path           # Absolute path to the file
-    category: str        # "agent_instruction" | "dot_directory_md" | "source_code"
+    category: str        # "agent_instruction" | "dot_directory_md" | "source_code" | "skill"
     relative_path: str   # Path relative to repo root
     size_bytes: int      # File size in bytes
+
+@dataclass
+class SkillUnit:
+    root: Path                # Absolute path to the skill directory
+    metadata_file: DiscoveredFile  # The SKILL.md file
+    files: list[DiscoveredFile]    # All files within the skill directory
+    frontmatter: SkillFrontmatter  # Parsed YAML frontmatter (name, description, etc.)
+    body: str                     # Body content after frontmatter
+
+@dataclass
+class SkillFrontmatter:
+    name: str                     # Skill name from frontmatter
+    description: str              # Skill description from frontmatter
+    license: str | None = None
+    compatibility: str | None = None
+    metadata: dict[str, str]      # Arbitrary metadata key-values
+    allowed_tools: str | None = None
 ```
 
 ## Behavior
@@ -99,6 +117,17 @@ Match `.md` files (recursively) in:
 Match files by extension. All files with the following extensions are included:
 - `.py`, `.js`, `.ts`, `.jsx`, `.tsx`, `.java`, `.go`, `.rs`, `.rb`, `.c`, `.cpp`, `.h`, `.hpp`, `.cs`, `.swift`, `.kt`, `.scala`, `.php`, `.sh`, `.bash`, `.zsh`, `.ps1`, `.svg`, `.yaml`, `.yml`, `.toml`, `.json`, `.xml`
 
+### Category: Skill Files
+
+When `SKILL.md` is discovered during the walk, the containing directory is treated as a **skill root**. All files within the skill root are re-categorized as `FileCategory.SKILL` and excluded from the non-skill file list. The scanner then:
+
+1. Walks the skill directory to discover any additional files missed by the initial tree walk
+2. Parses the `SKILL.md` frontmatter (YAML, extracting `name`, `description`, `license`, `compatibility`, `metadata`, `allowed-tools`)
+3. Builds a `SkillUnit` aggregating the metadata file, all bundled files, the frontmatter, and the body content
+4. Nested skills (skills within skills) are resolved with deepest-first priority
+
+Skill files are **not** subject to regular pattern matching — they pass through a dedicated skill-specific static analysis pipeline instead.
+
 ## Edge Cases
 
 | Case | Handling |
@@ -115,12 +144,19 @@ Match files by extension. All files with the following extensions are included:
 | `--exclude` pattern matches an agent instruction file | File IS excluded — exclude patterns override category matching |
 | Both `.gitignore` and `--exclude` specified | Both apply (union of exclusions) |
 | `--no-gitignore` with `--exclude` | Gitignore is disabled but user excludes still apply |
+| No `SKILL.md` files found | Return empty `skill_units` list; all files remain in non-skill output |
+| `SKILL.md` cannot be read (I/O error) | Skip that skill; all files in its directory remain in non-skill output |
+| Nested skill directories (skill inside skill) | Deepest skill root wins; parent skill does NOT include files belonging to the nested skill |
+| Skill directory contains only `SKILL.md` | SkillUnit is created with a single file (the SKILL.md itself) |
 
 ## Configuration Constants
 
 ```python
 # File size limit: skip files larger than this
 MAX_FILE_SIZE_BYTES: int = 10 * 1024 * 1024  # 10 MB
+
+# Filename that triggers skill discovery
+SKILL_METADATA_FILENAME: str = "SKILL.md"
 
 # Agent instruction files — matched by exact filename, case-insensitive
 AGENT_INSTRUCTION_FILES: tuple[str, ...] = (
@@ -168,10 +204,14 @@ GITIGNORE_FILENAME: str = ".gitignore"
 - **D006**: When `respect_gitignore=True` and `.gitignore` exists, files matching `.gitignore` patterns MUST be excluded from the output.
 - **D007**: `--exclude` patterns MUST exclude files regardless of their category — even agent instruction files are subject to user-specified exclusion.
 - **D008**: Exclusion filters MUST be applied BEFORE category matching to avoid unnecessary processing.
+- **D009**: Files within a skill directory MUST be re-categorized to `FileCategory.SKILL` and excluded from the non-skill file list — they MUST NOT appear in both outputs.
+- **D010**: When nested skill directories are detected, the deepest skill root takes precedence — files MUST be assigned to the innermost containing skill only.
+- **D011**: `discover_files` MUST return a tuple of `(non_skill_files, skill_units)`, not a flat list.
 
 ## Cross-References
 
 - [System Overview](../architecture/system-overview.md)
 - [Security Model](../architecture/security-model.md) — AV4: Path Traversal
 - [Byte-Level Analysis](byte-analysis.md)
+- [Pattern Matching](pattern-matching.md)
 - [CLI Interface](../contracts/cli-interface.md)

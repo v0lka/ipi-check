@@ -1,4 +1,4 @@
-# ipi-check — Indirect Prompt Injection Scanner
+# ipi-check — Indirect Prompt injection and skills security scanner
 
 [![CI](https://github.com/v0lka/ipi-check/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/v0lka/ipi-check/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
@@ -6,8 +6,10 @@
 [![SARIF](https://img.shields.io/badge/output-SARIF%20v2.1.0-green)](https://sarifweb.azurewebsites.net/)
 
 A SAST scanner that detects **indirect prompt injection** ([OWASP LLM01](https://genai.owasp.org/llmrisk/llm01-prompt-injection/)) in AI agent
-instruction files and source code. It combines deterministic static analysis with an
-optional LLM classifier and emits results as SARIF v2.1.0 — ready to upload to
+instruction files and source code, and performs **agent skill security auditing**
+— detecting malicious behavior (credential theft, remote execution, privilege abuse, secrecy)
+in AI agent skill directories (`SKILL.md`-based). It combines deterministic static analysis
+with an optional LLM classifier and emits results as SARIF v2.1.0 — ready to upload to
 GitHub Code Scanning, GitLab SAST, or any SARIF-aware viewer.
 
 ![ipi-check screenshot](images/screenshot.png)
@@ -23,16 +25,20 @@ the agent — exfiltrate secrets, run destructive commands, or rewrite its
 behavior. `ipi-check` scans a repository for the byte- and language-level
 signals of such attacks.
 
-The scanner is built around a **two-stage pipeline**:
+The scanner is built around a **three-phase pipeline**:
 
-1. **Stage 1 — Static analysis (always on).** Byte-level inspection, regex
+1. **Phase A — Static analysis (always on).** Byte-level inspection, regex
    pattern matching, and semantic heuristics produce per-file static results
    with deterministic confidence scores.
-2. **Stage 2 — LLM classification (optional, Case 2).** When an LLM provider is
+2. **Phase B — LLM classification (optional).** When an LLM provider is
    configured, sanitized file content is forwarded to the model for a
    structured classification verdict.
+3. **Phase C — Skill security audit (automatic).** When `SKILL.md` files are
+   discovered, skill units are analyzed with dedicated malware-focused static
+   patterns (IPI401–411) and optional LLM classification targeting malicious
+   behavior.
 
-A deterministic confidence-fusion matrix combines both stages into a final
+A deterministic confidence-fusion matrix combines all phases into a final
 verdict: `PASS`, `REVIEW_REQUIRED`, or `BLOCK`.
 
 ---
@@ -56,6 +62,9 @@ verdict: `PASS`, `REVIEW_REQUIRED`, or `BLOCK`.
 - **SVG file scanning** — SVG files are included as scan targets to detect prompt injection in `<desc>`, `<title>`, and `<metadata>` elements.
 - **Pre-LLM sanitization** — neutralizes invisible characters, ANSI escapes, base64-encoded blocks, and ROT13-obfuscated text before LLM processing; prevents the classifier itself from being prompt-injected.
 - **Batch LLM classification** for source code files with automatic chunking of oversized files and exponential-backoff retry on partial failures.
+- **Agent skill security auditing** — automatically detects `SKILL.md`-based skill directories and scans them for credential harvesting, remote code execution, privilege escalation, secrecy directives, and other malicious behavior.
+- **Skill-specific detection patterns (IPI401–411)** — dedicated regex patterns for obfuscated code, dynamic context abuse, hidden HTML instructions, and excessive permissions.
+- **Skill LLM classification** — dedicated skill classifier prompt focuses on shadow-feature detection (behavior not inferable from the skill description).
 - **Path-traversal protection** for symbolic links.
 - **Pygments-based code extraction** isolates comments and string literals
   from source files for targeted scanning.
@@ -403,15 +412,15 @@ mypy src/
 - `core/types.py` — shared data types, enums, and dataclasses.
 - `scanner/file_discovery.py` — locate AI-agent files and source files.
 - `scanner/byte_analysis.py` — detect hidden/abusive bytes.
-- `scanner/pattern_matching.py` — regex-based injection signatures.
+- `scanner/pattern_matching.py` — regex-based injection signatures + skill-specific patterns.
 - `scanner/semantic_heuristics.py` — entropy, density, invisibility ratios.
-- `scanner/static_result.py` — assemble static results and compute severity.
+- `scanner/static_result.py` — assemble static results and compute severity (per-file and per-skill).
 - `scanner/code_extractor.py` — Pygments-driven comment/string extraction.
 - `scanner/llm_sanitizer.py` — neutralize hostile content (invisible chars, ANSI, base64, ROT13) before the LLM call.
 - `scanner/token_counter.py` — tiktoken-based token counting for batch assembly.
-- `scanner/llm_classifier.py` — LiteLLM-backed Stage 2 classifier (single-file and batch).
-- `scanner/confidence_fusion.py` — deterministic verdict matrix.
-- `scanner/pipeline.py` — end-to-end orchestration (including batch LLM for source code).
+- `scanner/llm_classifier.py` — LiteLLM-backed classifier (single-file, batch, and per-skill).
+- `scanner/confidence_fusion.py` — deterministic verdict matrix (per-file and per-skill).
+- `scanner/pipeline.py` — end-to-end orchestration (non-skill files + skill audit).
 - `reporter/sarif_reporter.py` — SARIF v2.1.0 emission.
 - `cli/main.py` — argparse CLI entry point.
 

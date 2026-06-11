@@ -2,16 +2,17 @@
 
 ## Project Overview
 
-**ipi-check** is a SAST scanner that detects **indirect prompt injection** (OWASP LLM01) in AI agent instruction files and source code. It combines deterministic static analysis with an **optional** LLM classifier and emits **SARIF v2.1.0** — compatible with GitHub Code Scanning, GitLab SAST, and VS Code SARIF Viewer.
+**ipi-check** is a SAST scanner that detects **indirect prompt injection** (OWASP LLM01) in AI agent instruction files and source code. It also performs **agent skill security auditing** — detecting malicious behavior in AI agent skill directories (`SKILL.md`-based) such as credential theft, remote code execution, privilege abuse, and secrecy directives. It combines deterministic static analysis with an **optional** LLM classifier and emits **SARIF v2.1.0** — compatible with GitHub Code Scanning, GitLab SAST, and VS Code SARIF Viewer.
 
-The scanner protects against attackers who smuggle malicious instructions into files like `AGENTS.md`, `.cursorrules`, `CLAUDE.md`, `.windsurfrules`, or source-code comments — files that LLM-powered coding agents read and trust.
+The scanner protects against attackers who smuggle malicious instructions into files like `AGENTS.md`, `.cursorrules`, `CLAUDE.md`, `.windsurfrules`, or source-code comments — files that LLM-powered coding agents read and trust. It also defends against malicious agent skills that attempt credential harvesting, data exfiltration, or hidden functionality under the guise of legitimate tools.
 
-### Two-Stage Pipeline
+### Three-Phase Pipeline
 
-1. **Stage 1 — Static analysis (always on).** Byte-level inspection, regex pattern matching, and semantic heuristics produce per-file results with deterministic confidence scores.
-2. **Stage 2 — LLM classification (optional).** When an LLM provider is configured via CLI or environment, sanitized content is forwarded to the model for a structured classification verdict.
+1. **Phase A — Non-skill file analysis (always on).** Byte-level inspection, regex pattern matching, and semantic heuristics produce per-file results with deterministic confidence scores.
+2. **Phase B — Non-skill LLM classification (optional).** When an LLM provider is configured via CLI or environment, sanitized content is forwarded to the model for a structured classification verdict.
+3. **Phase C — Skill security audit (always on).** When `SKILL.md` files are discovered, skill units undergo dedicated static analysis (skill-specific patterns IPI401–411) and optional LLM classification (`classify_skill_with_llm()`) focusing on malicious behavior detection — not instruction injection.
 
-A deterministic confidence-fusion matrix combines both stages into a final verdict: `PASS`, `REVIEW_REQUIRED`, or `BLOCK`.
+A deterministic confidence-fusion matrix combines both stages into a final verdict: `PASS`, `REVIEW_REQUIRED`, or `BLOCK` — for both individual files and skill units.
 
 ---
 
@@ -70,24 +71,35 @@ ipi-check/
 ## Architecture — Scanner Layers
 
 ```
-Layer 1: File Discovery     →  DiscoveredFile
-Layer 2: Byte Analysis      →  ByteFinding[]
-Layer 3: Pattern Matching   →  PatternFinding[]
-Layer 4: Semantic Heuristics →  HeuristicScores
-          ↓
-     StaticResult  (assembled via static_result.py)
-          ↓
-Layer 5: Code Extraction + Sanitization  (only for LLM path)
-Layer 6: LLM Classification              (optional, single-file or batch)
-Layer 7: Confidence Fusion               → FinalVerdict (BLOCK/REVIEW_REQUIRED/PASS)
+Layer 1: File Discovery     →  (non_skill_files, skill_units)
+                                   │
+            ┌──────────────────────┼──────────────────────────┐
+            ▼                      ▼                          ▼
+    Phase A: Non-skill     Phase C: Skill Audit        Shared
+    ──────────────────     ─────────────────────       ──────
+Layer 2: Byte Analysis     C1: Skill Static Analysis   Layer 8:
+Layer 3: Pattern Matching   (byte + skill patterns     SARIF
+Layer 4: Semantic Heuristics  per file, heuristics      Reporter
+          ↓                  on SKILL.md body)
+     StaticResult                  ↓
+          ↓                 C2: Skill LLM
+Layer 5: Sanitization       (classify_skill_with_llm,
+Layer 6: LLM Classification   optional)
+          ↓                        ↓
+Layer 7: Confidence Fusion  C3: Skill Fusion
+     FinalVerdict            (fuse_skill_verdict)
+                                   ↓
+                              SkillFinalVerdict
 ```
 
 ### Layer Details
 
 **Layer 1 — File Discovery** (`file_discovery.py`)
 
-- Discovers: agent instruction files (`.cursorrules`, `AGENTS.md`, `CLAUDE.md`, etc.), dot-directory markdown (`.github/*.md`), and source code (20+ extensions).
+- Discovers: agent instruction files (`.cursorrules`, `AGENTS.md`, `CLAUDE.md`, etc.), dot-directory markdown (`.github/*.md`), source code (20+ extensions), and **skill directories** (directories containing `SKILL.md`).
+- Skill discovery: When `SKILL.md` is found, the containing directory becomes a **skill root**. All files in that directory are re-categorized as `FileCategory.SKILL` and grouped into a `SkillUnit` (parsed frontmatter + body + bundled files). Nested skills are resolved deepest-first.
 - Skips: binaries, files >10 MB, `.git/`, gitignore-matching paths, symlinks escaping the repo root.
+- Returns a tuple: `(non_skill_files, skill_units)`.
 - Supports `--exclude` glob patterns and `--no-gitignore`.
 
 **Layer 2 — Byte Analysis** (`byte_analysis.py`)
@@ -104,6 +116,7 @@ Detects hidden content at byte level:
 **Layer 3 — Pattern Matching** (`pattern_matching.py`)
 Regex-based detection with ReDoS protection (0.1s thread timeout per line):
 
+### Injection patterns (for non-skill files):
 - Instruction overrides (INSTR_001–006) — CRITICAL (includes multilingual: RU, CN, FR, ES, DE, JP, KR)
 - Authority claims (AUTH_001–003, AUTH_005–007) — HIGH (includes CVE-2025-53773 `chat.tools.autoApprove`)
 - Destructive commands (DEST_001–004) — CRITICAL
@@ -115,6 +128,21 @@ Regex-based detection with ReDoS protection (0.1s thread timeout per line):
 - Instruction contradiction (CONTRA_001–003) — HIGH/MEDIUM
 
 Severity downgrade: non-agent `.md` files are capped at MEDIUM.
+
+### Skill-specific patterns (IPI401–411, for skill files only):
+- Remote code execution (IPI401) — CRITICAL (`curl | bash`, `pickle.loads` with b64decode)
+- Credential harvesting (IPI402) — HIGH (sensitive env vars: `AWS_ACCESS_KEY_ID`, `GITHUB_TOKEN`, etc.)
+- External data transmission (IPI403) — CRITICAL (`curl`/`wget`/`requests.post` to external URLs)
+- Dynamic context abuse (IPI404) — HIGH (`!\`command\`` pattern)
+- Excessive permissions (IPI405) — HIGH (wildcard in `allowed-tools`)
+- Obfuscated skill code (IPI406) — MEDIUM (`base64 -d`, `b64decode`, `atob()`)
+- Hidden HTML-comment instructions (IPI407) — HIGH
+- Command injection in body (IPI408) — CRITICAL
+- Secrecy/coercion (IPI409) — CRITICAL ("do NOT tell the user", "silently", "covertly")
+- Privilege escalation (IPI410) — CRITICAL (`sudo`, `chmod 7xx`, `chown root`)
+- Filesystem enumeration (IPI411) — MEDIUM (`find /`, `os.walk("/")`)
+
+Skill files (`FileCategory.SKILL`) skip regular `match_patterns()` entirely — they pass through `match_skill_patterns()` with this dedicated pattern set.
 
 **Layer 4 — Semantic Heuristics** (`semantic_heuristics.py`)
 
@@ -136,14 +164,19 @@ Severity downgrade: non-agent `.md` files are capped at MEDIUM.
 - System prompt instructs the model to analyze, not follow
 - Single-file mode: per-file classification with `CLASSIFIER_SYSTEM_PROMPT`
 - Batch mode: multi-file classification for source code with `BATCH_CLASSIFIER_SYSTEM_PROMPT`
+- Skill mode: per-skill classification with `SKILL_CLASSIFIER_SYSTEM_PROMPT` — focuses on malicious behavior detection (credential theft, data exfiltration, remote execution, privilege abuse, agent manipulation, hidden functionality, shadow features) rather than instruction injection
 - Oversized files (>30K tokens) are chunked and classified per-chunk, then merged (worst verdict wins); additionally checked for cross-chunk intra-file contradictions between early and late claims
 - Partial batch failures trigger per-file retry with exponential backoff (1s → 2s → 4s, max 3 attempts)
 - Any failure (network, timeout, invalid schema) → compromised fallback
 - LLM timeout: 180 seconds per call
 
 **Layer 7 — Confidence Fusion** (`confidence_fusion.py`)
-Deterministic decision matrix:
+Deterministic decision matrix (applied identically to per-file and per-skill verdicts):
 
+- `fuse_verdicts()` — for non-skill files
+- `fuse_skill_verdict()` — for skill units (same matrix, aggregated across all files)
+
+Decision matrix:
 - CRITICAL static → always BLOCK (LLM skipped, invariant I002)
 - HIGH static + malicious/suspicious LLM → BLOCK
 - HIGH static + safe LLM → REVIEW_REQUIRED
@@ -158,24 +191,27 @@ Deterministic decision matrix:
 
 ## Key Invariants
 
-1. **CRITICAL static severity always blocks** — LLM is not consulted for these files (invariant I002).
+1. **CRITICAL static severity always blocks** — LLM is not consulted for these files or skills (invariant I002).
 2. **Scanner always exits 0** on successful scan regardless of findings — the SARIF carries the verdicts.
 3. **Exit codes**: 0 = success, 1 = runtime error, 2 = usage error.
 4. **LLM result contamination**: if the LLM response fails JSON schema validation, it's marked `compromised=True` and static-only fallback is used.
 5. **Path traversal protection**: symlinks resolving outside the repo root are skipped with a warning.
 6. **Pre-LLM sanitization**: invisible characters are replaced with visible placeholders before sending to LLM — prevents the scanner itself from being prompt-injected.
+7. **Skill/regular pattern separation**: skill files (`FileCategory.SKILL`) are NOT scanned with injection patterns (IPI101–109). They use dedicated skill patterns (IPI401–411) via `match_skill_patterns()`.
+8. **Automatic skill discovery**: no CLI flags required — `SKILL.md` files trigger skill unit creation automatically.
 
 ---
 
 ## Rule IDs
 
-| Range      | Layer               |
-| ---------- | ------------------- |
-| IPI001–007 | Byte analysis       |
-| IPI101–109 | Pattern matching    |
-| IPI201–204 | Semantic heuristics |
-| IPI301     | LLM findings        |
-| IPI900     | LLM compromise      |
+| Range       | Layer                        |
+| ----------- | ---------------------------- |
+| IPI001–007  | Byte analysis                |
+| IPI101–109  | Pattern matching (injection) |
+| IPI201–204  | Semantic heuristics          |
+| IPI301      | LLM findings                 |
+| IPI401–411  | Skill pattern matching       |
+| IPI900      | LLM compromise               |
 
 CWE mappings: CWE-506 (embedded malicious code), CWE-451 (UI misrepresentation), CWE-1007 (insufficient visual distinction), CWE-77 (command injection).
 
@@ -261,7 +297,8 @@ ipi-check scan REPO_PATH [--llm-model NAME] [--llm-api-token TOKEN]
 ## SARIF Output
 
 - Version 2.1.0, schema: `https://json.schemastore.org/sarif-2.1.0.json`
-- Each finding includes: `ruleId`, `level` (error/warning/note/none), `message` (text + markdown), physical location with line/column
+- Per-file findings: each finding includes `ruleId`, `level` (error/warning/note/none), `message` (text + markdown), physical location with line/column
+- Per-skill findings: each skill produces one SARIF result with `SKILL.md` as the primary location and all bundled files listed as `relatedLocations`
 - User-controlled content is HTML-escaped and truncated at 200 chars (R005)
 - Rule definitions include CWE tags in `properties.tags`
 

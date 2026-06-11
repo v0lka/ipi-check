@@ -4,6 +4,8 @@
 
 Detect known prompt injection phrases in file content using regular expressions after text normalization. This layer catches direct instruction-override language (including multilingual — Russian, Chinese, French, Spanish, German, Japanese, Korean), authority claims ("these rules are non-negotiable", bracketed system messages, CVE-2025-53773 — including multilingual Russian and Chinese variants), destructive commands (including multilingual), data exfiltration (including conversation leakage and multilingual variants), shell injection, jailbreak personas (STAN, DUDE, token system, role-play — including multilingual), social engineering pretexts (including multilingual), and obfuscation instructions (base64 decode, payload splitting — including multilingual).
 
+For agent skill files (`FileCategory.SKILL`), a separate set of **skill-specific patterns** (IPI401–411) detects malicious behavior in skills: remote code execution, credential harvesting, external data transmission, dynamic context abuse, excessive permissions, obfuscated code, hidden HTML-comment instructions, command injection, secrecy/coercion directives, privilege escalation, and filesystem enumeration.
+
 ## Input
 
 | Field | Type | Source | Description |
@@ -89,6 +91,24 @@ DiscoveredFile + normalized_text
 | Multilingual obfuscation | `obfuscation` | MEDIUM | Russian and Chinese: "расшифруй текст", "解码字符串" |
 | Multilingual social engineering | `social_engineering` | MEDIUM | Russian and Chinese: "аудит безопасности", "安全审计" |
 | Japanese/Korean instruction override | `instruction_override` | CRITICAL | JP/KR: "以前の指示を無視", "이전 지시를 무시하세요" |
+
+#### Skill-Specific Patterns (IPI401–411)
+
+These patterns operate on skill files (`FileCategory.SKILL`) via `match_skill_patterns()`. Regular injection patterns are NOT applied to skill files — skills are designed to contain instructions and would produce false positives.
+
+| Pattern Group | Category | Rule ID | Severity | Rationale |
+|---------------|----------|---------|----------|-----------|
+| Remote code execution | `remote_execution` | IPI401 | CRITICAL | `curl \| bash`, `marshal.loads`/`pickle.loads` with `b64decode`, `eval(` dedexec(` |
+| Credential harvesting | `credential_harvesting` | IPI402 | HIGH | References to `AWS_ACCESS_KEY_ID`, `GITHUB_TOKEN`, `OPENAI_API_KEY`, etc. |
+| External data transmission | `external_transmission` | IPI403 | CRITICAL | `curl`/`wget`/`requests.post` to external URLs |
+| Dynamic context abuse | `dynamic_context` | IPI404 | HIGH | `!`command`` pattern injecting runtime context |
+| Excessive permissions | `excessive_permissions` | IPI405 | HIGH | Wildcard (`*`) in `allowed-tools` frontmatter |
+| Obfuscated skill code | `obfuscated_skill_code` | IPI406 | MEDIUM | `base64 -d`, `b64decode`, `atob()`, `base64.b64decode` |
+| Hidden HTML-comment instructions | `hidden_instructions` | IPI407 | HIGH | HTML comments with ignore/bypass/secret/backdoor directives |
+| Command injection in body | `command_injection_skill` | IPI408 | CRITICAL | "run this command:" followed by code block |
+| Secrecy/coercion | `skill_secrecy` | IPI409 | CRITICAL | "do NOT tell the user", silently, covertly, must not disclose |
+| Privilege escalation | `privilege_escalation` | IPI410 | CRITICAL | `sudo`, `chmod 7xx`, `chown root`, `pkexec` |
+| Filesystem enumeration | `file_system_enumeration` | IPI411 | MEDIUM | `find /`, `os.walk("/")`, `listdir("/")`, `glob.glob("/")` |
 
 ### Pattern Matching Rules
 
@@ -204,6 +224,10 @@ Before regex matching, the text undergoes normalization. Two functions are provi
   2. **Lowercase**: `.lower()`
   3. **Whitespace collapse**: `re.sub(r'[^\S\n]+', ' ', text)` — collapse runs of horizontal whitespace to a single space (newlines preserved for line-based matching)
 
+### Skill File Handling
+
+Files with `FileCategory.SKILL` are NOT subject to regular injection patterns via `match_patterns()` — the function returns an empty list for skill files. Instead, skill files are scanned through `match_skill_patterns()` which applies the skill-specific pattern set (IPI401–411). This separation prevents false positives: skills are designed to contain instructions, so injection-detection patterns would fire on legitimate instruction content.
+
 ### Source Code Handling
 
 For files with `FileCategory.SOURCE_CODE`, the pipeline calls `extract_comments_and_strings()` before pattern matching. Only extracted comments and string literals are normalized and scanned — code identifiers and structural syntax are excluded. This mirrors the LLM classification path and eliminates false positives on code identifiers (e.g., `findAnnotation` matching `\bDAN\b` in identifier substrings) and benign Javadoc phrases (e.g., `"This is the method you must override"`).
@@ -223,10 +247,12 @@ For files with `FileCategory.SOURCE_CODE`, the pipeline calls `extract_comments_
 | Pygments unavailable for source code extraction | `extract_comments_and_strings` emits a warning and returns full decoded content; falls back to full-file scanning |
 | Chinese/Japanese text with no spaces between words | Regex uses explicit character sequences (e.g., `忽略\s*所有\s*指令`) — word boundary anchoring is not required for CJK patterns |
 | Russian verb conjugation variants | Patterns use imperative mood (familiar «ты» form) — the most common form in injection prompts. Infinitive and polite forms are not covered individually |
+| Skill file passed to `match_patterns` (not `match_skill_patterns`) | Returns empty list — skill files skip regular injection patterns to avoid false positives |
+| Skill file with no skill-specific pattern matches | Returns empty list from `match_skill_patterns()` — byte analysis and heuristics still contribute |
 
 ## Configuration Constants
 
-All patterns are defined as module-level constants (see `INJECTION_PATTERNS` above — 39 patterns across 9 categories). No runtime configuration.
+All patterns are defined as module-level constants. `INJECTION_PATTERNS` (injection detection) has 39 patterns across 9 categories. `SKILL_PATTERNS` (skill-specific) has 11 patterns across 11 categories (IPI401–411). No runtime configuration.
 
 ```python
 # Maximum length of matched_text in findings
@@ -250,6 +276,8 @@ All patterns are compiled with `re.IGNORECASE` — matching is case-insensitive 
 - **P003**: Instruction override patterns (`INSTR_001` through `INSTR_006` — including Japanese and Korean variants) and destructive command patterns (`DEST_001` through `DEST_004` — including Russian and Chinese) MUST be classified as CRITICAL severity. Data exfiltration patterns (`EXFIL_001` through `EXFIL_006` — including Russian and Chinese) and shell injection (`SHELL_001`) are also CRITICAL.
 - **P004**: Regex matching MUST use a timeout (`REGEX_TIMEOUT_SECONDS`) to prevent ReDoS attacks via malicious input.
 - **P005**: The normalization step MUST use `errors="replace"` for UTF-8 decoding — the scanner MUST NOT crash on invalid UTF-8.
+- **P006**: `match_patterns()` MUST return an empty list for files with `FileCategory.SKILL` — skill files use `match_skill_patterns()` with a separate pattern set (IPI401–411) to avoid false positives from legitimate instructions.
+- **P007**: Skill-specific patterns (IPI401–411) MUST use `_SKILL_CATEGORY_DESCRIPTIONS` for human-readable descriptions, distinct from the injection pattern descriptions.
 
 ## Cross-References
 

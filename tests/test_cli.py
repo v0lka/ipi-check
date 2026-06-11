@@ -1,4 +1,5 @@
 """Tests for the CLI entry point."""
+
 from __future__ import annotations
 
 import json
@@ -32,17 +33,13 @@ class TestCLIMain:
         out = capsys.readouterr()
         assert "ipi-check" in (out.out + out.err)
 
-    def test_help_exits_zero(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_help_exits_zero(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr("sys.argv", ["ipi-check", "--help"])
         with pytest.raises(SystemExit) as exc:
             main()
         assert exc.value.code == 0
 
-    def test_no_arguments_exits_two(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_no_arguments_exits_two(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr("sys.argv", ["ipi-check"])
         with pytest.raises(SystemExit) as exc:
             main()
@@ -57,9 +54,7 @@ class TestCLIMain:
             main()
         assert exc.value.code == 2
 
-    def test_path_is_file_exits_two(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-    ) -> None:
+    def test_path_is_file_exits_two(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         f = tmp_path / "x.md"
         f.write_text("hi")
         monkeypatch.setattr("sys.argv", ["ipi-check", "scan", str(f)])
@@ -89,14 +84,12 @@ class TestCLIMain:
         tmp_path: Path,
         capsys: pytest.CaptureFixture,
     ) -> None:
-        monkeypatch.setattr(
-            "sys.argv", ["ipi-check", "scan", str(tmp_path), "--quiet"]
-        )
+        monkeypatch.setattr("sys.argv", ["ipi-check", "scan", str(tmp_path), "--quiet"])
         with pytest.raises(SystemExit):
             main()
         captured = capsys.readouterr()
         # No banner / summary on stderr.
-        assert "Prompt Injection Scanner" not in captured.err
+        assert "Prompt injection and skills security scanner" not in captured.err
         assert "RESULTS" not in captured.err
         assert "Scanned:" not in captured.err
         # SARIF still goes to stdout.
@@ -133,6 +126,7 @@ class TestBuildParser:
     def test_no_gitignore_flag_parsed(self) -> None:
         """--no-gitignore flag is recognized."""
         from ipi_check.cli.main import build_parser
+
         parser = build_parser()
         args = parser.parse_args(["scan", "/tmp", "--no-gitignore"])
         assert args.no_gitignore is True
@@ -140,6 +134,7 @@ class TestBuildParser:
     def test_exclude_single_pattern(self) -> None:
         """--exclude with a single pattern."""
         from ipi_check.cli.main import build_parser
+
         parser = build_parser()
         args = parser.parse_args(["scan", "/tmp", "--exclude", "*.log"])
         assert args.exclude == ["*.log"]
@@ -147,15 +142,15 @@ class TestBuildParser:
     def test_exclude_multiple_patterns(self) -> None:
         """--exclude can be repeated for multiple patterns."""
         from ipi_check.cli.main import build_parser
+
         parser = build_parser()
-        args = parser.parse_args(
-            ["scan", "/tmp", "--exclude", "*.log", "--exclude", "vendor/"]
-        )
+        args = parser.parse_args(["scan", "/tmp", "--exclude", "*.log", "--exclude", "vendor/"])
         assert args.exclude == ["*.log", "vendor/"]
 
     def test_exclude_default_is_none(self) -> None:
         """--exclude defaults to None when not specified."""
         from ipi_check.cli.main import build_parser
+
         parser = build_parser()
         args = parser.parse_args(["scan", "/tmp"])
         assert args.exclude is None

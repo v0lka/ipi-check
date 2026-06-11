@@ -32,14 +32,18 @@ Find the right spec for your task:
 │  └── security-model.md ──── (depends on byte-analysis, llm-classifier, reporting) │
 │                                                                     │
 │  domains/                                                           │
-│  ├── file-discovery.md ──── (no dependencies)                       │
+│  ├── file-discovery.md ──── (no dependencies; produces SkillUnits)  │
 │  ├── byte-analysis.md ───── (depends on file-discovery)             │
-│  ├── pattern-matching.md ── (depends on file-discovery, byte-analysis) │
+│  ├── pattern-matching.md ── (depends on file-discovery, byte-analysis; │
+│  │                            includes skill patterns IPI401–411)   │
 │  ├── semantic-heuristics.md (depends on file-discovery, byte-analysis) │
-│  ├── llm-classifier.md ──── (depends on file-discovery, byte-analysis) │
+│  ├── llm-classifier.md ──── (depends on file-discovery, byte-analysis; │
+│  │                            includes skill classifier)            │
 │  ├── confidence-fusion.md ─ (depends on byte-analysis, pattern-matching, │
-│  │                            semantic-heuristics, llm-classifier)  │
-│  └── reporting.md ───────── (depends on confidence-fusion)          │
+│  │                            semantic-heuristics, llm-classifier;  │
+│  │                            includes skill verdict fusion)        │
+│  └── reporting.md ───────── (depends on confidence-fusion;         │
+│                               includes skill SARIF results)         │
 │                                                                     │
 │  contracts/                                                         │
 │  └── cli-interface.md ───── (depends on system-overview,            │
@@ -69,13 +73,13 @@ Find the right spec for your task:
 - [Security Model](architecture/security-model.md) — Threat model, attack vectors, defense mechanisms, trust boundaries
 
 ### Domains
-- [File Discovery](domains/file-discovery.md) — Layer 1: discovering AI instruction files and source code
+- [File Discovery](domains/file-discovery.md) — Layer 1: discovering AI instruction files, source code, and SKILL.md-based skills
 - [Byte-Level Analysis](domains/byte-analysis.md) — Layer 2: detecting hidden content at byte level
-- [Pattern Matching](domains/pattern-matching.md) — Layer 3: regex-based injection phrase detection
+- [Pattern Matching](domains/pattern-matching.md) — Layer 3: regex-based injection phrase detection + skill malicious pattern detection (IPI401–411)
 - [Semantic Heuristics](domains/semantic-heuristics.md) — Layer 4: entropy, invisible ratio, instruction density
-- [LLM Classifier](domains/llm-classifier.md) — Case 2: sanitization + LiteLLM classification
-- [Confidence Fusion](domains/confidence-fusion.md) — Case 2: merging static + LLM verdicts
-- [Reporting](domains/reporting.md) — Layer 5: SARIF v2.1.0 output generation
+- [LLM Classifier](domains/llm-classifier.md) — Case 2: sanitization + LiteLLM classification (per-file, batch, and per-skill)
+- [Confidence Fusion](domains/confidence-fusion.md) — Case 2: merging static + LLM verdicts (per-file and per-skill)
+- [Reporting](domains/reporting.md) — SARIF v2.1.0 output generation (per-file results and per-skill results)
 
 ### Contracts
 - [CLI Interface](contracts/cli-interface.md) — Command-line arguments, env expansion, exit codes, examples

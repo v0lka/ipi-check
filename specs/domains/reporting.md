@@ -2,15 +2,16 @@
 
 ## Responsibility
 
-Generate a SARIF v2.1.0 report from scan findings. The report aggregates `FinalVerdict` objects into a standards-compliant SARIF document suitable for GitHub Code Scanning, GitLab SAST, and IDE integrations.
+Generate a SARIF v2.1.0 report from scan findings. The report aggregates `FinalVerdict` objects (per-file) and `SkillFinalVerdict` objects (per-skill) into a standards-compliant SARIF document suitable for GitHub Code Scanning, GitLab SAST, and IDE integrations.
 
 ## Input
 
-| Field       | Type                 | Source            | Description                                     |
-| ----------- | -------------------- | ----------------- | ----------------------------------------------- |
-| `verdicts`  | `List[FinalVerdict]` | Confidence Fusion | Final per-file decisions with all findings      |
-| `repo_path` | `Path`               | CLI argument      | Repository root (for relative path computation) |
-| `tool_info` | `ToolInfo`           | Package metadata  | Tool name, version, semantic version            |
+| Field            | Type                          | Source            | Description                                     |
+| ---------------- | ----------------------------- | ----------------- | ----------------------------------------------- |
+| `verdicts`       | `List[FinalVerdict]`          | Confidence Fusion | Final per-file decisions with all findings      |
+| `skill_verdicts` | `List[SkillFinalVerdict]`     | Confidence Fusion | Final per-skill decisions (optional)            |
+| `repo_path`      | `Path`                        | CLI argument      | Repository root (for relative path computation) |
+| `tool_info`      | `ToolInfo`                    | Package metadata  | Tool name, version, semantic version            |
 
 ```python
 @dataclass
@@ -32,15 +33,31 @@ The SARIF document is written to a file or stdout. The output target is determin
 ## Behavior
 
 ```
-List[FinalVerdict] + repo_path + tool_info
+List[FinalVerdict] + List[SkillFinalVerdict]? + repo_path + tool_info
         │
         ▼
 ┌───────────────────────────────┐
-│ 1. Group verdicts by file     │
+│ 1. Build per-file results     │
 │    One sarif.Result per file  │
+│    finding (from verdicts)    │
+│    + heuristic results        │
 └───────────────┬───────────────┘
                 │
-                ▼
+        ┌───────┴────────┐
+        │ skill_verdicts?│
+        ├───────┬────────┤
+        │ YES   │ NO     │
+        ▼       ▼
+┌──────────────┐   skip
+│ 1b. Build    │
+│    per-skill │
+│    results   │
+│    (one per  │
+│    skill)    │
+└──────┬───────┘
+       │
+       └────────────────┐
+                        ▼
 ┌───────────────────────────────┐
 │ 2. Convert each finding to    │
 │    sarif.Result               │
@@ -58,6 +75,7 @@ List[FinalVerdict] + repo_path + tool_info
 │    - REVIEW_REQUIRED count    │
 │    - PASS count               │
 │    - Total files scanned       │
+│    - Skill verdict counts     │
 └───────────────┬───────────────┘
                 │
                 ▼
@@ -114,6 +132,17 @@ Each finding category maps to a SARIF rule with a stable `ruleId`:
 | `invisible_ratio`      | `IPI202` | CWE-506  |
 | `instruction_density`  | `IPI203` | CWE-77   |
 | `llm_finding.*`        | `IPI301` | CWE-77   |
+| `remote_execution`     | `IPI401` | CWE-77   |
+| `credential_harvesting`| `IPI402` | CWE-77   |
+| `external_transmission`| `IPI403` | CWE-77   |
+| `dynamic_context`      | `IPI404` | CWE-77   |
+| `excessive_permissions`| `IPI405` | CWE-77   |
+| `obfuscated_skill_code`| `IPI406` | CWE-506  |
+| `hidden_instructions`  | `IPI407` | CWE-77   |
+| `command_injection_skill`| `IPI408` | CWE-77 |
+| `skill_secrecy`        | `IPI409` | CWE-77   |
+| `privilege_escalation` | `IPI410` | CWE-77   |
+| `file_system_enumeration`| `IPI411` | CWE-506 |
 
 **Note on SARIF levels:** LLM findings (`IPI301`) are reported at `warning` level since they represent probabilistic classifications rather than deterministic detections. Byte-level and pattern findings follow the severity-to-level mapping table above. LLM compromise (`IPI900`) is reported at `note` level as it indicates a diagnostic condition rather than a security finding.
 
@@ -178,6 +207,8 @@ Each finding category maps to a SARIF rule with a stable `ruleId`:
 | Finding without line/column information             | `region` is omitted from the `physicalLocation`                     |
 | File path contains special characters               | URI-encoded in `artifactLocation.uri` per SARIF spec                |
 | LLM compromise warnings                             | Reported as `note`-level result with `ruleId: IPI900` and `CWE-506` |
+| Skill verdict (no specific line)                    | Skill result uses SKILL.md as primary location with `relatedLocations` pointing to all bundled files |
+| Skill with no findings                              | Skill not included in SARIF results (no finding → no result entry)  |
 
 ## Configuration Constants
 
@@ -203,7 +234,7 @@ LLM_COMPROMISE_RULE_ID: str = "IPI900"
 
 ## Dependencies
 
-- **Confidence Fusion**: receives `List[FinalVerdict]`
+- **Confidence Fusion**: receives `List[FinalVerdict]` and `List[SkillFinalVerdict]`
 
 ## Invariants
 
@@ -214,6 +245,7 @@ LLM_COMPROMISE_RULE_ID: str = "IPI900"
 - **R005**: User-controlled content in SARIF `message.text` and `message.markdown` MUST be escaped to prevent SARIF injection.
 - **R006**: If the output target is a file, the extension MUST be `.sarif`.
 - **R007**: The SARIF output MUST include an `invocations` array with `executionSuccessful` and timestamps.
+- **R008**: Each skill unit MUST produce at most one SARIF result — the `SKILL.md` file serves as the primary location artifact, with all other skill files listed as `relatedLocations`.
 
 ## Cross-References
 

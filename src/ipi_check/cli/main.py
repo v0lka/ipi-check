@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from ipi_check import TOOL_INFO, __version__
-from ipi_check.core.types import FinalVerdict, LLMConfig, VerdictDecision
+from ipi_check.core.types import FinalVerdict, LLMConfig, SkillFinalVerdict, VerdictDecision
 from ipi_check.reporter.sarif_reporter import generate_sarif
 from ipi_check.scanner.pipeline import run_pipeline
 
@@ -22,7 +22,7 @@ from ipi_check.scanner.pipeline import run_pipeline
 
 ENV_VAR_PATTERN: re.Pattern[str] = re.compile(r"\$\{([^}]+)\}")
 
-BANNER_TEMPLATE: str = "{name} {version} — Prompt Injection Scanner"
+BANNER_TEMPLATE: str = "{name} {version} — Prompt injection and skills security scanner"
 
 # Results summary formatting (per CLI contract).
 _RESULTS_HEADING: str = "RESULTS"
@@ -198,6 +198,7 @@ def _print_summary(
     *,
     quiet: bool,
     output_path: Path | None,
+    skill_verdicts: list[SkillFinalVerdict] | None = None,
 ) -> None:
     """Print the formatted results block to stderr unless ``quiet``."""
     if quiet:
@@ -207,15 +208,33 @@ def _print_summary(
     pass_count = sum(1 for v in verdicts if v.decision == VerdictDecision.PASS)
     total = len(verdicts)
 
+    # Skill counts
+    skill_block = 0
+    skill_review = 0
+    skill_pass = 0
+    if skill_verdicts:
+        skill_block = sum(1 for v in skill_verdicts if v.decision == VerdictDecision.BLOCK)
+        skill_review = sum(
+            1 for v in skill_verdicts if v.decision == VerdictDecision.REVIEW_REQUIRED
+        )
+        skill_pass = sum(1 for v in skill_verdicts if v.decision == VerdictDecision.PASS)
+
     target = str(output_path) if output_path is not None else _SARIF_STDOUT_LABEL
+    scanned_line = f"Scanned: {total} files"
+    if skill_verdicts:
+        scanned_line += f" + {len(skill_verdicts)} skills"
     lines = [
         "",
         _RESULTS_HEADING,
         _RESULTS_RULE_CHAR * _RESULTS_RULE_WIDTH,
-        f"Scanned: {total} files",
+        scanned_line,
         f"  BLOCK:           {block_count}",
         f"  REVIEW_REQUIRED: {review_count}",
         f"  PASS:            {pass_count}",
+    ]
+    if skill_verdicts:
+        lines.append(f"  Skills: {skill_block} BLOCK, {skill_review} REVIEW, {skill_pass} PASS")
+    lines += [
         "",
         f"SARIF report written to {target}",
     ]
@@ -293,7 +312,7 @@ def main() -> None:
 
     start_time = _utc_now_iso8601()
     try:
-        verdicts = run_pipeline(
+        verdicts, skill_verdicts = run_pipeline(
             repo_path,
             llm_config,
             quiet=quiet,
@@ -314,10 +333,16 @@ def main() -> None:
         tool_info=TOOL_INFO,
         start_time=start_time,
         end_time=end_time,
+        skill_verdicts=skill_verdicts,
     )
 
     _emit_sarif(sarif_doc, output_path)
-    _print_summary(verdicts, quiet=quiet, output_path=output_path)
+    _print_summary(
+        verdicts,
+        quiet=quiet,
+        output_path=output_path,
+        skill_verdicts=skill_verdicts,
+    )
     sys.exit(EXIT_SUCCESS)
 
 
