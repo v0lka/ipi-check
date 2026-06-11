@@ -263,10 +263,10 @@ def fuse_skill_verdict(
 
     # Collect all findings across every file in the skill.
     all_findings: list[ByteFinding | PatternFinding | LLMFinding] = []
-    for per_file in skill_static.file_byte_findings:
-        all_findings.extend(per_file)
-    for per_file in skill_static.file_pattern_findings:
-        all_findings.extend(per_file)
+    for byte_findings in skill_static.file_byte_findings:
+        all_findings.extend(byte_findings)
+    for pattern_findings in skill_static.file_pattern_findings:
+        all_findings.extend(pattern_findings)
 
     # Determine effective LLM state.
     llm_compromised = bool(llm_result is not None and llm_result.compromised)

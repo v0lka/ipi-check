@@ -4,7 +4,7 @@ These tests verify that ipi-check correctly detects known attack patterns
 in samples derived from:
 
 a) Code files from real repositories with malicious IPI injections
-   (NVIDIA Codex AGENTS.md attack, CVE-2025-53773 Copilot YOLO, 
+   (NVIDIA Codex AGENTS.md attack, CVE-2025-53773 Copilot YOLO,
    Unicode tag backdoors)
 
 b) Known malicious skills with backdoors and malware
@@ -12,10 +12,8 @@ b) Known malicious skills with backdoors and malware
 """
 from __future__ import annotations
 
-import json
-import sys
+import tempfile
 from pathlib import Path
-from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -23,7 +21,6 @@ from ipi_check import TOOL_INFO
 from ipi_check.core.types import (
     ByteFindingCategory,
     FileCategory,
-    LLMConfig,
     PatternFindingCategory,
     Severity,
     VerdictDecision,
@@ -123,11 +120,11 @@ class TestNvidiaCodexAgentsMd:
         verdicts, _ = run_pipeline(td, llm_config=None, quiet=True)
         assert len(verdicts) >= 1
         assert any(v.decision == VerdictDecision.BLOCK for v in verdicts), (
-            f"Expected at least one BLOCK verdict"
+            "Expected at least one BLOCK verdict"
         )
 
     @staticmethod
-    def _agent_file(file_path: Path) -> "DiscoveredFile":  # noqa: F821
+    def _agent_file(file_path: Path) -> DiscoveredFile:  # noqa: F821
         from ipi_check.core.types import DiscoveredFile
 
         return DiscoveredFile(
@@ -178,7 +175,7 @@ class TestCopilotYoloCve:
         src = c_dir / "main.c"
         (tmp / "main.c").write_bytes(src.read_bytes())
         verdicts, _ = run_pipeline(tmp, llm_config=None, quiet=True)
-        # Source code patterns in comments are BLOCK-level through fusion, but 
+        # Source code patterns in comments are BLOCK-level through fusion, but
         # pattern matching severity for code files is capped differently.
         # The pipeline should still produce some verdict.
         assert len(verdicts) >= 1
@@ -797,8 +794,6 @@ class TestSafeSamples:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-import tempfile
 
 
 def _make_tmp() -> str:
