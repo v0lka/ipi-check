@@ -6,7 +6,7 @@
 [![SARIF](https://img.shields.io/badge/output-SARIF%20v2.1.0-green)](https://sarifweb.azurewebsites.net/)
 
 A SAST scanner that detects **indirect prompt injection** ([OWASP LLM01](https://genai.owasp.org/llmrisk/llm01-prompt-injection/)) in AI agent
-instruction files and source code, and performs **agent skill security auditing**
+instruction files, documents and source code, and performs **agent skill security auditing**
 — detecting malicious behavior (credential theft, remote execution, privilege abuse, secrecy)
 in AI agent skill directories (`SKILL.md`-based). It combines deterministic static analysis
 with an optional LLM classifier and emits results as SARIF v2.1.0 — ready to upload to
