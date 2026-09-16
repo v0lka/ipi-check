@@ -40,6 +40,26 @@ jobs:
       - run: pip install -e ".[dev]"
       - run: pytest tests/ -v --tb=short
 
+  dependency-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install uv pip-audit
+      - name: Verify lockfile is in sync with pyproject.toml
+        run: uv lock --check
+      - name: Export locked dependencies
+        run: >
+          uv export --frozen --no-hashes --no-emit-project --all-extras
+          --format requirements-txt
+          --output-file "$RUNNER_TEMP/requirements-audit.txt"
+      - name: Audit dependencies for known vulnerabilities
+        run: >
+          pip-audit --requirement "$RUNNER_TEMP/requirements-audit.txt"
+          --no-deps --disable-pip --progress-spinner off
+
   docker:
     runs-on: ubuntu-latest
     needs: [lint, type-check, test]

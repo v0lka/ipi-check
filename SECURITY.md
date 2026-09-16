@@ -98,7 +98,7 @@ The scanner is inherently a **read-only, offline-first** tool. It stores no data
 | SARIF injection (AV3)                 | Medium   | HTML escaping + 200-char truncation in `sarif_reporter.py`                                                                                                      |
 | Path traversal via symlinks (AV4)     | Medium   | Symlink targets resolved and validated against repo root in `file_discovery.py`                                                                                 |
 | LLM API token exposure in CI logs     | Medium   | Accepted: tokens are passed via CLI arg or env var; CI config does not echo them, but caller is responsible for secret masking                                  |
-| No dependency lockfile                | Low      | Accepted: hatchling-based build pins to `>=` minimums; CI runs on clean venvs; full lockfile pending pre-1.0 stability                                          |
+| Vulnerable transitive dependency        | Low      | Committed `uv.lock` pins the full tree; CI runs `pip-audit` over the locked set and asserts lockfile↔`pyproject.toml` sync (`uv lock --check`) |
 
 ---
 
@@ -142,11 +142,14 @@ See [AV1 in the security model](specs/architecture/security-model.md#av1-llm-cla
 | `litellm`  | >=1.0   | LLM provider abstraction          | Community-standard, actively maintained; deferred import for graceful fallback        |
 | `pathspec` | >=0.12  | `.gitignore` pattern matching     | Used by major tools (Black, etc.); minimal attack surface                             |
 | `pygments` | >=2.17  | Code lexer for comment extraction | Widely used; deferred import; fallback to full-text when unavailable                  |
+| `regex`    | >=2024.0 | ReDoS-hardened regex engine       | Runtime dep for byte/pattern matching; timeouts bound match cost |
 | `tiktoken` | >=0.5   | Token counting for batch assembly | OpenAI maintained; optional `[batch]` extra; deferred import with char-based fallback |
 
-- No lockfile (hatchling `>=` pins); CI runs with clean venvs
-- CI pipeline (`lint → type-check → test → docker`) gates all merges
-- No automated dependency vulnerability scanning is configured (tracked for future CI enhancement)
+- The full dependency tree (runtime + `dev` + `batch` extras) is pinned in the committed [`uv.lock`](uv.lock)
+- CI asserts the lockfile stays in sync with `pyproject.toml` via `uv lock --check` (fails the build on drift)
+- `pip-audit` scans the fully-resolved locked set for known vulnerabilities on every push and PR (the `dependency-scan` job)
+- A `[tool.uv]` `constraint-dependencies` floor keeps vulnerable transitive pins at or above the first fixed release (currently `aiohttp>=3.14.3`)
+- CI pipeline (`lint → type-check → test → dependency-scan → docker`) gates all merges
 
 ### Logging & Monitoring
 
@@ -202,8 +205,9 @@ These guidelines apply to ALL contributors: human developers, code reviewers, an
 
 ### Dependency & Supply Chain Rules
 
-- All dependencies are declared in `pyproject.toml` with minimum version pins
-- CI runs lint + type-check + tests on every push and PR
+- All dependencies are declared in `pyproject.toml` with minimum version pins and resolved into the committed `uv.lock`
+- CI runs lint + type-check + tests + `pip-audit` dependency scan on every push and PR
+- After changing dependencies, regenerate and commit the lockfile (`uv lock`); CI fails on drift (`uv lock --check`)
 - Do not add dependencies with: no maintenance activity >12 months, known unpatched critical vulnerabilities, excessive transitive trees for trivial functionality
 - Prefer standard-library solutions when possible (e.g., `argparse` over `click`, `pathlib` over `os.path`)
 
@@ -243,6 +247,7 @@ The following actions are FORBIDDEN for any AI agent working on this repository:
 9. **No magic security thresholds** — All numeric thresholds (entropy, invisible ratio, instruction density, confidence) must be defined as named module-level constants, never as magic numbers inline (invariant I006).
 
 10. **No uncontrolled SARIF content** — User-controlled content in SARIF output must always pass through `_escape_sarif_content()` for HTML escaping and truncation.
+11. **No lockfile drift** — After changing dependencies in `pyproject.toml`, regenerate and commit `uv.lock` (`uv lock`). CI asserts sync via `uv lock --check`; a drifted lockfile fails the dependency scan.
 
 ### Behavioral Guidelines for Agents
 
@@ -267,8 +272,9 @@ The following actions are FORBIDDEN for any AI agent working on this repository:
 | [`src/ipi_check/scanner/pattern_matching.py`](src/ipi_check/scanner/pattern_matching.py)   | ReDoS protection via thread-based regex timeout                                                   |
 | [`src/ipi_check/scanner/token_counter.py`](src/ipi_check/scanner/token_counter.py)         | Token counting for batch assembly (tiktoken with char-based fallback)                             |
 | [`scripts/ipi-check-hook.sh`](scripts/ipi-check-hook.sh)                                   | Git hook wrapper with BLOCK verdict enforcement                                                   |
-| [`.github/workflows/ci.yml`](.github/workflows/ci.yml)                                     | CI with lint, type-check, tests (Python 3.12+3.13), docker build                                  |
-| [`pyproject.toml`](pyproject.toml)                                                         | Build config, dependency declarations, linter/type-checker settings                               |
+| [`.github/workflows/ci.yml`](.github/workflows/ci.yml)                                     | CI with lint, type-check, tests (Python 3.12+3.13), `pip-audit` dependency scan, docker build     |
+| [`uv.lock`](uv.lock)                                                                       | Committed lockfile pinning the full dependency tree; audited by CI in the `dependency-scan` job   |
+| [`pyproject.toml`](pyproject.toml)                                                         | Build config, dependency declarations, `[tool.uv]` security floor, linter/type-checker settings   |
 | [`.gitignore`](.gitignore)                                                                 | Excludes `.env`, `.venv`, bytecode, caches                                                        |
 | [`Dockerfile`](Dockerfile)                                                                 | Multi-stage build on `python:3.12-slim`                                                           |
 | [`specs/architecture/security-model.md`](specs/architecture/security-model.md)             | Threat model and security invariants                                                              |
@@ -280,3 +286,4 @@ The following actions are FORBIDDEN for any AI agent working on this repository:
 | Date       | Author      | Change                                                   |
 | ---------- | ----------- | -------------------------------------------------------- |
 | 2026-06-06 | @vkochetkov | Initial security policy generated from codebase analysis |
+| 2026-09-16 | @vkochetkov | Add committed `uv.lock`, CI `pip-audit` dependency scan, and lockfile-sync gate |

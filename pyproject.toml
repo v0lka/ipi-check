@@ -48,3 +48,11 @@ warn_unused_configs = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.uv]
+# Security floor for transitive dependencies. `aiohttp` (pulled in via
+# `litellm`) is resolved through the lockfile; versions below 3.14.3 carry
+# known vulnerabilities reported by `pip-audit`. The constraint keeps the
+# locked resolution at or above the first fixed release so the CI
+# dependency scan (see .github/workflows/ci.yml) stays green.
+constraint-dependencies = ["aiohttp>=3.14.3"]
