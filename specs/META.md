@@ -36,7 +36,11 @@ specs/
     ├── 002-sarif-format.md
     ├── 003-two-stage-pipeline.md
     ├── 004-litellm-provider.md
-    └── 005-pygments-code-extraction.md
+    ├── 005-pygments-code-extraction.md
+    ├── 006-tiktoken-token-counting.md
+    ├── 007-example-region-context.md
+    ├── 008-sarif-result-suppression.md
+    └── 009-fp-corpus-recall-gate.md
 ```
 
 ## Spec Types and Templates

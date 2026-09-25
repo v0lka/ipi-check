@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "generated_by": "scripts/ipi_metrics.py",
+  "manifest": "samples/metrics-corpus/manifest.json",
+  "samples": 20,
+  "positives": 7,
+  "negatives": 13,
+  "tp": 7,
+  "fp": 0,
+  "fn": 0,
+  "tn": 13,
+  "precision": 1.0,
+  "recall": 1.0,
+  "f1": 1.0,
+  "thresholds": {
+    "min_precision": 1.0,
+    "min_recall": 1.0
+  }
+}

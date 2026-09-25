@@ -16,6 +16,11 @@ Find the right spec for your task:
 | Change verdict fusion logic | [Confidence Fusion](domains/confidence-fusion.md) |
 | Change SARIF output format | [Reporting](domains/reporting.md) |
 | Add/modify CLI arguments | [CLI Interface](contracts/cli-interface.md) |
+| Choose a report format or exit-code policy | [CLI Interface](contracts/cli-interface.md) |
+| Suppress a finding (`.ipi-checkignore`, inline directive) | [Reporting](domains/reporting.md), [CLI Interface](contracts/cli-interface.md) |
+| Configure the LLM call budget, response cache, or usage accounting | [CLI Interface](contracts/cli-interface.md), [LLM Classifier](domains/llm-classifier.md) |
+| Understand the example-region context engine | [ADR-007](decisions/007-example-region-context.md) |
+| Understand the FP / recall quality gate | [ADR-009](decisions/009-fp-corpus-recall-gate.md) |
 | Understand architectural decisions | [ADR Index](#architecture-decision-records) |
 | Understand spec system conventions | [META](META.md) |
 | Learn how to work with specs | [WORKFLOW](WORKFLOW.md) |
@@ -55,8 +60,16 @@ Find the right spec for your task:
 │  ├── 003-two-stage-pipeline.md (depends on system-overview, security-model, │
 │  │                               llm-classifier, confidence-fusion) │
 │  ├── 004-litellm-provider.md (depends on llm-classifier, cli-interface) │
-│  └── 005-pygments-code-extraction.md (depends on llm-classifier,         │
-│       file-discovery, 004-litellm-provider)                               │
+│  ├── 005-pygments-code-extraction.md (depends on llm-classifier,         │
+│  │       file-discovery, 004-litellm-provider)                           │
+│  ├── 006-tiktoken-token-counting.md (depends on llm-classifier,          │
+│  │       004-litellm-provider)                                           │
+│  ├── 007-example-region-context.md (depends on pattern-matching,         │
+│  │       005-pygments-code-extraction)                                   │
+│  ├── 008-sarif-result-suppression.md (depends on reporting,              │
+│  │       cli-interface, 002-sarif-format)                                │
+│  └── 009-fp-corpus-recall-gate.md (depends on pattern-matching,          │
+│           reporting, 007-example-region-context)                         │
 │                                                                     │
 └─────────────────────────────────────────────────────────────────────┘
 ```
@@ -90,6 +103,10 @@ Find the right spec for your task:
 - [ADR-003: Two-Stage Pipeline](decisions/003-two-stage-pipeline.md) — Why static-then-LLM
 - [ADR-004: LiteLLM Provider](decisions/004-litellm-provider.md) — Why LiteLLM as unified provider
 - [ADR-005: Pygments Code Extraction](decisions/005-pygments-code-extraction.md) — Why Pygments tokenization for code file preprocessing
+- [ADR-006: tiktoken Token Counting](decisions/006-tiktoken-token-counting.md) — Why tiktoken for accurate token counting in batch LLM processing
+- [ADR-007: Example-Region Context Engine](decisions/007-example-region-context.md) — Why quoted examples are downgraded, never dropped
+- [ADR-008: SARIF Result Suppression](decisions/008-sarif-result-suppression.md) — Why results are threshold-gated, deduplicated and capped
+- [ADR-009: FP Corpus Recall Gate](decisions/009-fp-corpus-recall-gate.md) — Why the quality gate pairs a labelled FP corpus with a recall guard
 
 ### Templates
 - [ADR Template](decisions/_template.md) — Template for new Architecture Decision Records

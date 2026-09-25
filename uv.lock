@@ -599,6 +599,7 @@ dependencies = [
     { name = "litellm" },
     { name = "pathspec" },
     { name = "pygments" },
+    { name = "pyyaml" },
     { name = "regex" },
 ]
 
@@ -622,6 +623,7 @@ requires-dist = [
     { name = "pygments", specifier = ">=2.17" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
     { name = "pytest-mock", marker = "extra == 'dev'", specifier = ">=3.12" },
+    { name = "pyyaml", specifier = ">=6.0" },
     { name = "regex", specifier = ">=2024.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.4" },
     { name = "tiktoken", marker = "extra == 'batch'", specifier = ">=0.5" },

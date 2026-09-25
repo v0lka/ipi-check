@@ -3,7 +3,9 @@ from __future__ import annotations
 
 from ipi_check.core.types import (
     ByteFinding,
+    CompromisedReason,
     DiscoveredFile,
+    FileCategory,
     FinalVerdict,
     LLMFinding,
     LLMResult,
@@ -14,6 +16,7 @@ from ipi_check.core.types import (
     StaticResult,
     VerdictDecision,
 )
+from ipi_check.scanner.static_result import significant_finding_label
 
 # Confidence threshold above which an LLM `malicious` verdict is treated as high-confidence.
 HIGH_CONFIDENCE_THRESHOLD: float = 0.85
@@ -40,7 +43,84 @@ _REASONING_COMPROMISED_FALLBACK: str = (
 _REASONING_NO_LLM_FALLBACK: str = (
     "Static-only analysis (LLM not invoked)"
 )
+_REASONING_INJECTION_SUSPECTED: str = (
+    "LLM classifier response is compromised with signs of prompt injection "
+    "on the classifier (injection_suspected) — escalating to manual review"
+)
 _REASONING_NO_CRITICAL_CATEGORY: str = "unknown"
+_REASONING_SKILL_SIGNIFICANCE_TEMPLATE: str = " — significant finding: {significance}"
+
+
+def _skill_severity_descriptor(severity: Severity, significance: str) -> str:
+    """Render a severity label, appending the significant-finding trigger.
+
+    ``significance`` is a short ``<rule> <category> in <path>`` label naming
+    the finding that pushed the skill to this severity (see
+    :func:`ipi_check.scanner.static_result.significant_finding_label`). It is
+    surfaced in the verdict reasoning so that a skill's aggregate severity is
+    auditable — which finding, exactly, caused the verdict. When there is no
+    significant finding (e.g. a MEDIUM-driven review), the plain severity value
+    is used.
+    """
+    if significance:
+        return f"{severity.value} ({significance})"
+    return severity.value
+
+
+def _skill_fallback_reasoning(base: str, significance: str) -> str:
+    """Append the significant-finding trigger to a static-only skill reasoning.
+
+    Leaves ``base`` untouched when the skill has no significant finding (e.g. a
+    PASS skill), so unchanged fallback messages stay stable.
+    """
+    if not significance:
+        return base
+    return base + _REASONING_SKILL_SIGNIFICANCE_TEMPLATE.format(
+        significance=significance
+    )
+
+
+def _is_injection_suspected(llm_result: LLMResult | None) -> bool:
+    """Return True when the LLM result is compromised *and* injection-suspected.
+
+    Such a result is an attack signal, not an ordinary failure: it must never
+    be silently downgraded to ``safe`` (see :class:`CompromisedReason`).
+    """
+    return (
+        llm_result is not None
+        and llm_result.compromised
+        and llm_result.compromised_reason == CompromisedReason.INJECTION_SUSPECTED
+    )
+
+
+def _escalate_for_injection(decision: VerdictDecision) -> VerdictDecision:
+    """Raise a ``PASS`` decision to ``REVIEW_REQUIRED`` for an injection signal.
+
+    BLOCK and REVIEW_REQUIRED are already at least as strict, so they are
+    returned unchanged. This guarantees an injection-suspected response never
+    produces a ``PASS``.
+    """
+    if decision == VerdictDecision.PASS:
+        return VerdictDecision.REVIEW_REQUIRED
+    return decision
+
+
+def _has_framed_agent_finding(static_result: StaticResult) -> bool:
+    """Return True when an agent-instruction file has a framed finding.
+
+    A *framed* finding is one whose severity was capped by example-region
+    framing (a cue list, a table row, an inline-code span) — see
+    :attr:`PatternFinding.framed`. In an agent-instruction file that framing
+    is attacker-writable prose, indistinguishable from a genuine quotation,
+    so the cap keeps benign quoted examples below BLOCK (FP-5) while this
+    flag lets fusion refuse the opposite failure: a fooled "safe" LLM verdict
+    fusing the file to a silent PASS. Such files are floored at
+    REVIEW_REQUIRED.
+    """
+    file = static_result.file
+    if file.category != FileCategory.AGENT_INSTRUCTION:
+        return False
+    return any(finding.framed for finding in static_result.pattern_findings)
 
 
 def _first_critical_category(static_result: StaticResult) -> str:
@@ -198,13 +278,19 @@ def fuse_verdicts(
     # No usable LLM → static-only fallback path.
     if not llm_usable:
         decision = _static_only_decision(severity)
-        reasoning = _build_reasoning(
-            decision=decision,
-            severity=severity,
-            static_result=static_result,
-            llm_result=llm_result,
-            llm_compromised_fallback=llm_compromised,
-        )
+        if _is_injection_suspected(llm_result):
+            # An injection-suspected response is an attack signal on the
+            # classifier — never let it collapse to PASS.
+            decision = _escalate_for_injection(decision)
+            reasoning = _REASONING_INJECTION_SUSPECTED
+        else:
+            reasoning = _build_reasoning(
+                decision=decision,
+                severity=severity,
+                static_result=static_result,
+                llm_result=llm_result,
+                llm_compromised_fallback=llm_compromised,
+            )
         return FinalVerdict(
             file=file,
             decision=decision,
@@ -224,6 +310,12 @@ def fuse_verdicts(
         llm_verdict=llm_result.verdict,
         llm_confidence=llm_result.confidence,
     )
+    if _has_framed_agent_finding(static_result):
+        # The example-region cap on an agent-instruction file is a precision
+        # compromise, not a trust decision: the framing is attacker-writable,
+        # so the file must never fuse to a silent PASS on a (possibly fooled)
+        # "safe" verdict — floor it at REVIEW_REQUIRED.
+        decision = _escalate_for_injection(decision)
     reasoning = _build_reasoning(
         decision=decision,
         severity=severity,
@@ -261,6 +353,11 @@ def fuse_skill_verdict(
     severity: Severity = skill_static.aggregate_severity
     skill = skill_static.skill
 
+    # "Significance": the single worst HIGH+/CRITICAL finding that determined
+    # the aggregate severity. Surfaced in the reasoning so the verdict is
+    # auditable (FP-14).
+    significance = significant_finding_label(skill_static)
+
     # Collect all findings across every file in the skill.
     all_findings: list[ByteFinding | PatternFinding | LLMFinding] = []
     for byte_findings in skill_static.file_byte_findings:
@@ -279,22 +376,39 @@ def fuse_skill_verdict(
     )
 
     if llm_usable and llm_result is not None:
+        # A skill's LLM findings describe the skill as a whole; anchor them at
+        # its SKILL.md so the reporter can place them (T4.3 / IN-3).
+        for finding in llm_result.findings:
+            finding.file = skill.metadata_file
         all_findings.extend(llm_result.findings)
+
+    # Severity label carrying the significant-finding trigger, used by every
+    # reasoning branch below.
+    severity_label = _skill_severity_descriptor(severity, significance)
 
     # Short-circuit: CRITICAL static finding always BLOCKs.
     if severity == Severity.CRITICAL:
         decision = VerdictDecision.BLOCK
         reasoning = (
-            f"CRITICAL static finding in skill "
+            f"CRITICAL static finding "
+            f"({significance or _REASONING_NO_CRITICAL_CATEGORY}) in skill "
             f"'{skill.frontmatter.name}' — LLM classification skipped"
         )
     elif not llm_usable:
         # No usable LLM → static-only fallback.
         decision = _static_only_decision(severity)
-        if llm_compromised:
-            reasoning = _REASONING_COMPROMISED_FALLBACK
+        if _is_injection_suspected(llm_result):
+            # Injection signal on the classifier: escalate, never PASS.
+            decision = _escalate_for_injection(decision)
+            reasoning = _REASONING_INJECTION_SUSPECTED
+        elif llm_compromised:
+            reasoning = _skill_fallback_reasoning(
+                _REASONING_COMPROMISED_FALLBACK, significance
+            )
         else:
-            reasoning = _REASONING_NO_LLM_FALLBACK
+            reasoning = _skill_fallback_reasoning(
+                _REASONING_NO_LLM_FALLBACK, significance
+            )
     else:
         # Usable LLM: apply full decision matrix.
         assert llm_result is not None  # noqa: S101 — narrowed by `llm_usable`.
@@ -305,13 +419,13 @@ def fuse_skill_verdict(
         )
         if decision == VerdictDecision.BLOCK:
             reasoning = _REASONING_CONSENSUS_TEMPLATE.format(
-                severity=severity.value,
+                severity=severity_label,
                 verdict=llm_result.verdict,
                 confidence=llm_result.confidence,
             )
         elif decision == VerdictDecision.REVIEW_REQUIRED:
             reasoning = _REASONING_REVIEW_TEMPLATE.format(
-                severity=severity.value,
+                severity=severity_label,
                 verdict=llm_result.verdict,
             )
         else:

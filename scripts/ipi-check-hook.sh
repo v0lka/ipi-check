@@ -2,19 +2,33 @@
 # ipi-check-hook.sh — blocking git-hook wrapper around `ipi-check scan`.
 #
 # Intended for client-side hooks (post-checkout, post-merge, post-rewrite,
-# pre-commit, ...). It runs `ipi-check scan` over the current repository,
-# stores the SARIF report under .git/, parses the verdict summary, and
-# exits non-zero when a BLOCK verdict is reported. The non-zero exit is
-# propagated by Git as the exit status of the triggering command, which
-# is what makes the hook "blocking" in practice.
+# pre-commit, ...). It runs `ipi-check scan` over the current repository with an
+# explicit `--fail-on` policy and maps the scanner's *exit code* to the hook
+# status. It never parses the human-readable stderr summary (no grep/sed over
+# the banner or counters), so it keeps working no matter how that text is
+# worded, formatted or localized. The non-zero exit is propagated by Git as the
+# exit status of the triggering command, which is what makes the hook
+# "blocking" in practice.
 #
 # post-checkout invocation:  <prev_HEAD> <new_HEAD> <branch_flag>
 #   branch_flag == 0  → file checkout (skip; usually noisy and irrelevant)
 #   branch_flag == 1  → branch checkout (run the scan)
 #
+# Hook exit codes (non-zero = the hook blocks):
+#   0  scan completed with no policy-level findings
+#   1  scanner could not run, or the --fail-on policy was tripped
+#
+# Scanner exit codes this hook consumes (see specs/contracts/cli-interface.md):
+#   0  scan completed clean            → hook: 0
+#   3  BLOCK verdict present           → hook: 1  (blocking)
+#   4  REVIEW_REQUIRED verdict only    → hook: 1  (only under --fail-on review)
+#   1  runtime error / 2 usage error   → hook: 1
+#
 # Environment variables:
 #   IPI_CHECK_HOOK_DISABLE=1     skip the scan entirely.
 #   IPI_CHECK_BLOCK_ON_REVIEW=1  also fail on REVIEW_REQUIRED verdicts.
+#   IPI_CHECK_FAIL_ON            explicit --fail-on value (none|block|review);
+#                                overrides the two shortcuts above.
 #   IPI_CHECK_BIN                override the ipi-check executable path.
 
 set -euo pipefail
@@ -45,42 +59,50 @@ if ! command -v "$IPI_CHECK_BIN" >/dev/null 2>&1; then
     exit 0
 fi
 
+# 5. Resolve the --fail-on policy. Default is "block": the hook blocks on BLOCK
+#    verdicts exactly as before. IPI_CHECK_BLOCK_ON_REVIEW=1 widens it to
+#    REVIEW_REQUIRED; IPI_CHECK_FAIL_ON overrides both.
+FAIL_ON="block"
+if [ "${IPI_CHECK_BLOCK_ON_REVIEW:-0}" = "1" ]; then
+    FAIL_ON="review"
+fi
+FAIL_ON="${IPI_CHECK_FAIL_ON:-$FAIL_ON}"
+
 SARIF_FILE="$REPO_ROOT/.git/ipi-check-last.sarif"
 STDERR_FILE="$(mktemp -t ipi-check-stderr.XXXXXX)"
 trap 'rm -f "$STDERR_FILE"' EXIT
 
-# 5. Run the scan. ipi-check itself exits 0 on a clean run regardless of
-#    findings — verdicts live in the SARIF report and the stderr summary.
-if ! "$IPI_CHECK_BIN" scan "$REPO_ROOT" --output "$SARIF_FILE" 2> "$STDERR_FILE"; then
-    cat "$STDERR_FILE" >&2
-    echo "ipi-check: scanner failed to run." >&2
-    exit 1
+# 6. Run the scan, letting the scanner itself decide the policy via --fail-on.
+#    Its exit code — not its stderr text — drives the hook. The if/else form
+#    keeps `set -e` from aborting and preserves the exact scanner status.
+if "$IPI_CHECK_BIN" scan "$REPO_ROOT" --output "$SARIF_FILE" \
+        --fail-on "$FAIL_ON" 2> "$STDERR_FILE"; then
+    SCAN_STATUS=0
+else
+    SCAN_STATUS=$?
 fi
 
-# 6. Re-emit the scanner banner + summary so the user sees them in their
-#    terminal, then extract the BLOCK / REVIEW_REQUIRED counters.
+# 7. Re-emit the scanner banner + summary so the user sees them in their
+#    terminal (cosmetic only — nothing here is parsed).
 cat "$STDERR_FILE" >&2
 
-BLOCK_COUNT="$(grep -E '^\s*BLOCK:' "$STDERR_FILE" | sed -n 's/.*BLOCK:[[:space:]]*\([0-9][0-9]*\).*/\1/p' | tail -n 1)"
-REVIEW_COUNT="$(grep -E '^\s*REVIEW_REQUIRED:' "$STDERR_FILE" | sed -n 's/.*REVIEW_REQUIRED:[[:space:]]*\([0-9][0-9]*\).*/\1/p' | tail -n 1)"
-BLOCK_COUNT="${BLOCK_COUNT:-0}"
-REVIEW_COUNT="${REVIEW_COUNT:-0}"
-
-# 7. Decision matrix.
-if [ "$BLOCK_COUNT" -gt 0 ]; then
-    echo "ipi-check: BLOCK verdict — prompt-injection findings detected." >&2
-    echo "ipi-check: SARIF report: $SARIF_FILE" >&2
-    exit 1
-fi
-
-if [ "${IPI_CHECK_BLOCK_ON_REVIEW:-0}" = "1" ] && [ "$REVIEW_COUNT" -gt 0 ]; then
-    echo "ipi-check: REVIEW_REQUIRED and IPI_CHECK_BLOCK_ON_REVIEW=1 — failing." >&2
-    echo "ipi-check: SARIF report: $SARIF_FILE" >&2
-    exit 1
-fi
-
-if [ "$REVIEW_COUNT" -gt 0 ]; then
-    echo "ipi-check: REVIEW_REQUIRED findings present — see $SARIF_FILE" >&2
-fi
-
-exit 0
+# 8. Map the scanner exit code to the hook result (no text matching).
+case "$SCAN_STATUS" in
+    0)
+        exit 0
+        ;;
+    3)
+        echo "ipi-check: --fail-on=$FAIL_ON tripped — BLOCK verdict detected." >&2
+        echo "ipi-check: SARIF report: $SARIF_FILE" >&2
+        exit 1
+        ;;
+    4)
+        echo "ipi-check: --fail-on=$FAIL_ON tripped — REVIEW_REQUIRED verdict detected." >&2
+        echo "ipi-check: SARIF report: $SARIF_FILE" >&2
+        exit 1
+        ;;
+    *)
+        echo "ipi-check: scanner failed to run (exit $SCAN_STATUS)." >&2
+        exit 1
+        ;;
+esac

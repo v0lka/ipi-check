@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import re
 
+import regex
+
 from ipi_check.core.types import (
     ByteFinding,
     ByteFindingCategory,
@@ -33,8 +35,12 @@ BYTE_SIGNATURES: dict[str, tuple[re.Pattern[bytes], ByteFindingCategory, Severit
         ByteFindingCategory.UNICODE_TAGS,
         Severity.CRITICAL,
     ),
+    # VS1–VS15 (U+FE00–U+FE0E) have no legitimate emoji-presentation role and
+    # are a known invisible encoding channel. The emoji presentation selector
+    # (VS16, U+FE0F) is handled separately — it is legitimate after an emoji
+    # base, see ``_scan_variation_selector_16``.
     "variation_selectors": (
-        re.compile(rb"\xef\xb8[\x80-\xaf]"),
+        re.compile(rb"\xef\xb8[\x80-\x8e]"),
         ByteFindingCategory.VARIATION_SELECTORS,
         Severity.HIGH,
     ),
@@ -60,6 +66,26 @@ BYTE_SIGNATURES: dict[str, tuple[re.Pattern[bytes], ByteFindingCategory, Severit
     ),
 }
 
+# Emoji presentation selector (VS16, U+FE0F); raw UTF-8 bytes are EF B8 8F.
+# VS16 differs from VS1–VS15: it legitimately follows an emoji base character
+# (e.g. ``⚠`` U+26A0 + U+FE0F), so it is not part of BYTE_SIGNATURES and is
+# analysed with the base/density heuristics in ``_scan_variation_selector_16``.
+VS16_CHAR: str = "\ufe0f"
+
+# A preceding character counts as an "emoji base" when it carries the Unicode
+# Emoji property — the set of characters a presentation selector may modify
+# (symbols, keycap bases such as ``#``, ``*`` and digits, emoji blocks).
+EMOJI_BASE_PATTERN: regex.Pattern[str] = regex.compile(r"\p{Emoji}")
+
+# U+FE0F occurrences that *do* follow an emoji base are still reported when the
+# file is saturated with them — a signal of a steganographic variation-selector
+# channel (e.g. "Glassworm") rather than ordinary emoji usage. Density is the
+# U+FE0F count over the decoded character count; it is only considered
+# "anomalous" once at least :data:`VS16_MIN_COUNT_FOR_DENSITY` selectors are
+# present, so a handful of emoji in a short document is never flagged.
+VS16_DENSITY_THRESHOLD: float = 0.10
+VS16_MIN_COUNT_FOR_DENSITY: int = 10
+
 # Homoglyph mapping: Cyrillic lookalikes → Latin equivalents.
 HOMOGLYPH_MAP: dict[str, str] = {
     "а": "a", "е": "e", "о": "o", "р": "p", "с": "c",
@@ -68,8 +94,22 @@ HOMOGLYPH_MAP: dict[str, str] = {
     "С": "C", "Т": "T", "Х": "X",
 }
 
-# Threshold for homoglyph density: cyrillic-homoglyphs / (latin + cyrillic-homoglyphs).
-HOMOGLYPH_RATIO_THRESHOLD: float = 0.05
+# Homoglyph detection works at word-token granularity. A *mixed-script token*
+# is a maximal ``\w+`` run (``\w`` is Unicode-aware) that contains both Latin
+# and Cyrillic letters — the exact shape of a homoglyph attack (e.g. ``pаypal``
+# with a Cyrillic ``а``). A legitimate multilingual document only mixes scripts
+# *between* tokens, never within one.
+WORD_TOKEN_PATTERN: re.Pattern[str] = re.compile(r"\w+")
+
+# Cyrillic letters (U+0400–U+04FF).
+CYRILLIC_LETTER_PATTERN: re.Pattern[str] = re.compile(r"[\u0400-\u04FF]")
+
+# Cyrillic characters that are visually confusable with a Latin counterpart.
+CONFUSABLE_HOMOGLYPH_CHARS: frozenset[str] = frozenset(HOMOGLYPH_MAP)
+
+# A single file emits at most this many homoglyph (IPI006) findings, regardless
+# of how many mixed-script tokens it contains — prevents per-character floods.
+MAX_HOMOGLYPH_FINDINGS_PER_FILE: int = 1
 
 # Maximum number of bytes captured for a finding's hex snippet.
 MAX_HEX_SNIPPET_BYTES: int = 32
@@ -142,6 +182,72 @@ def _scan_byte_signatures(raw_bytes: bytes) -> list[ByteFinding]:
     return findings
 
 
+def _scan_variation_selector_16(raw_bytes: bytes) -> list[ByteFinding]:
+    """Detect suspicious emoji presentation selectors (U+FE0F).
+
+    A U+FE0F that directly follows an emoji base (e.g. ``⚠`` U+26A0 + U+FE0F)
+    is legitimate emoji presentation and is not reported. It is reported when
+    it has no preceding emoji base, or when the file's overall U+FE0F density
+    exceeds :data:`VS16_DENSITY_THRESHOLD` — a variation-selector encoding
+    channel rather than ordinary emoji usage.
+    """
+    findings: list[ByteFinding] = []
+    text = raw_bytes.decode(_TEXT_DECODE_ENCODING, errors=_TEXT_DECODE_ERRORS)
+    vs16_indices = [i for i, ch in enumerate(text) if ch == VS16_CHAR]
+    if not vs16_indices:
+        return findings
+
+    anomalous_density = (
+        len(vs16_indices) >= VS16_MIN_COUNT_FOR_DENSITY
+        and len(vs16_indices) / max(len(text), 1) > VS16_DENSITY_THRESHOLD
+    )
+
+    for char_index in vs16_indices:
+        has_emoji_base = char_index > 0 and bool(
+            EMOJI_BASE_PATTERN.match(text[char_index - 1])
+        )
+        if has_emoji_base and not anomalous_density:
+            continue
+        byte_offset = len(
+            text[:char_index].encode(_TEXT_DECODE_ENCODING, errors=_TEXT_DECODE_ERRORS)
+        )
+        line, column = _resolve_position(raw_bytes, byte_offset)
+        findings.append(
+            ByteFinding(
+                category=ByteFindingCategory.VARIATION_SELECTORS,
+                severity=Severity.HIGH,
+                line=line,
+                column=column,
+                snippet_hex=_hex_snippet(raw_bytes, byte_offset),
+                description=_DESCRIPTIONS[ByteFindingCategory.VARIATION_SELECTORS],
+            )
+        )
+    return findings
+
+
+def _dedupe_findings(findings: list[ByteFinding]) -> list[ByteFinding]:
+    """Collapse byte findings identical in category, severity, position and snippet.
+
+    Duplicates are dropped while the first occurrence and the original ordering
+    are preserved, so the per-file finding set stays deterministic.
+    """
+    seen: set[tuple[ByteFindingCategory, Severity, int, int, str]] = set()
+    unique: list[ByteFinding] = []
+    for finding in findings:
+        key = (
+            finding.category,
+            finding.severity,
+            finding.line,
+            finding.column,
+            finding.snippet_hex,
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(finding)
+    return unique
+
+
 def _scan_pua(raw_bytes: bytes) -> list[ByteFinding]:
     """Scan decoded text for Private Use Area characters."""
     findings: list[ByteFinding] = []
@@ -169,41 +275,78 @@ def _scan_pua(raw_bytes: bytes) -> list[ByteFinding]:
     return findings
 
 
+def _mixes_scripts(token: str) -> bool:
+    """Return ``True`` when ``token`` contains both Latin and Cyrillic letters."""
+    has_latin = False
+    has_cyrillic = False
+    for ch in token:
+        if _LATIN_LETTER_PATTERN.match(ch):
+            has_latin = True
+        elif CYRILLIC_LETTER_PATTERN.match(ch):
+            has_cyrillic = True
+        if has_latin and has_cyrillic:
+            return True
+    return False
+
+
+def _has_confusable_homoglyph(token: str) -> bool:
+    """Return ``True`` when ``token`` contains a Cyrillic Latin-lookalike."""
+    return any(ch in CONFUSABLE_HOMOGLYPH_CHARS for ch in token)
+
+
 def _scan_homoglyphs(raw_bytes: bytes) -> list[ByteFinding]:
-    """Detect Cyrillic homoglyphs when their density exceeds the threshold."""
-    findings: list[ByteFinding] = []
+    """Detect Cyrillic homoglyphs spliced into otherwise-Latin tokens.
+
+    Detection operates at *token* granularity rather than on a whole-file
+    Cyrillic ratio. A legitimate multilingual document (e.g. a Russian README)
+    places Latin and Cyrillic words side by side, but never inside the same
+    token. A homoglyph attack instead replaces a Latin letter with a lookalike
+    Cyrillic one *within a single identifier* (``pаypal`` with Cyrillic ``а``).
+
+    The proportion of mixed-script tokens among all word tokens is the
+    *suspicious mix ratio*. Findings are capped at
+    :data:`MAX_HOMOGLYPH_FINDINGS_PER_FILE` per file, and severity is downgraded
+    to :attr:`Severity.LOW` when a mix contains no confusable homoglyph (script
+    mixing without a Latin lookalike). Files with no mixed-script token are not
+    flagged at all.
+    """
     text = raw_bytes.decode(_TEXT_DECODE_ENCODING, errors=_TEXT_DECODE_ERRORS)
     if not text:
-        return findings
+        return []
 
-    homoglyph_chars = set(HOMOGLYPH_MAP.keys())
-    latin_count = sum(1 for ch in text if _LATIN_LETTER_PATTERN.match(ch))
-    cyrillic_homoglyph_count = sum(1 for ch in text if ch in homoglyph_chars)
-    total = latin_count + cyrillic_homoglyph_count
+    tokens = list(WORD_TOKEN_PATTERN.finditer(text))
+    mixed = [match for match in tokens if _mixes_scripts(match.group())]
+    if not mixed:
+        return []
 
-    if total == 0:
-        return findings
-    if cyrillic_homoglyph_count / total <= HOMOGLYPH_RATIO_THRESHOLD:
-        return findings
+    confusable = [match for match in mixed if _has_confusable_homoglyph(match.group())]
+    suspicious_mix_ratio = len(confusable) / len(tokens) if tokens else 0.0
 
-    for char_index, ch in enumerate(text):
-        if ch not in homoglyph_chars:
-            continue
-        byte_offset = len(
-            text[:char_index].encode(_TEXT_DECODE_ENCODING, errors=_TEXT_DECODE_ERRORS)
+    # Report the strongest token (a confusable homoglyph if present, else any
+    # script-mixing token). Severity: MEDIUM with a confusable homoglyph, LOW
+    # when scripts merely mix without a Latin-lookalike.
+    reported = confusable[0] if confusable else mixed[0]
+    severity = Severity.MEDIUM if confusable else Severity.LOW
+
+    byte_offset = len(
+        text[:reported.start()].encode(_TEXT_DECODE_ENCODING, errors=_TEXT_DECODE_ERRORS)
+    )
+    line, column = _resolve_position(raw_bytes, byte_offset)
+    description = (
+        f"{_DESCRIPTIONS[ByteFindingCategory.HOMOGLYPH]}"
+        f" (mixed-script token, suspicious mix ratio {suspicious_mix_ratio:.2f})"
+    )
+    findings = [
+        ByteFinding(
+            category=ByteFindingCategory.HOMOGLYPH,
+            severity=severity,
+            line=line,
+            column=column,
+            snippet_hex=_hex_snippet(raw_bytes, byte_offset),
+            description=description,
         )
-        line, column = _resolve_position(raw_bytes, byte_offset)
-        findings.append(
-            ByteFinding(
-                category=ByteFindingCategory.HOMOGLYPH,
-                severity=Severity.MEDIUM,
-                line=line,
-                column=column,
-                snippet_hex=_hex_snippet(raw_bytes, byte_offset),
-                description=_DESCRIPTIONS[ByteFindingCategory.HOMOGLYPH],
-            )
-        )
-    return findings
+    ]
+    return findings[:MAX_HOMOGLYPH_FINDINGS_PER_FILE]
 
 
 def analyze_bytes(file: DiscoveredFile, raw_bytes: bytes) -> list[ByteFinding]:
@@ -219,6 +362,7 @@ def analyze_bytes(file: DiscoveredFile, raw_bytes: bytes) -> list[ByteFinding]:
 
     findings: list[ByteFinding] = []
     findings.extend(_scan_byte_signatures(raw_bytes))
+    findings.extend(_scan_variation_selector_16(raw_bytes))
     findings.extend(_scan_pua(raw_bytes))
     findings.extend(_scan_homoglyphs(raw_bytes))
-    return findings
+    return _dedupe_findings(findings)

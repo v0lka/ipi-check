@@ -109,9 +109,9 @@ The scanner is inherently a **read-only, offline-first** tool. It stores no data
 The scanner was designed with the explicit understanding that it analyzes adversarial content. The following invariants are enforced in code (see [`specs/architecture/security-model.md`](specs/architecture/security-model.md)):
 
 - **S001**: The scanner MUST NOT execute or evaluate any content from scanned files — it is strictly a read-and-analyze tool. All file I/O uses binary read mode (`open(path, "rb")`).
-- **S002**: File content sent to the LLM MUST pass through [Pre-LLM Sanitization](src/ipi_check/scanner/llm_sanitizer.py) first — unsanitized content MUST NOT cross the LLM API boundary.
+- **S002**: File content sent to the LLM MUST pass through [Pre-LLM Sanitization](src/ipi_check/scanner/llm_sanitizer.py) first — unsanitized content MUST NOT cross the LLM API boundary. This applies to every call path, including the skill classifier: a skill's declared name, description, body, and each bundled textual script are sanitized before the skill LLM call.
 - **S003**: The LLM response MUST be parsed as structured JSON — the parser rejects any response that is not valid JSON matching the expected schema.
-- **S004**: If the LLM response fails JSON parsing, the scanner MUST fall back to the static-only verdict and emit `IPI900` (LLM_CLASSIFIER_COMPROMISED).
+- **S004**: If the LLM response fails JSON parsing, the scanner MUST fall back to the static-only verdict and emit the `IPI900` compromise diagnostic — it MUST NOT attempt to interpret free-text LLM output.
 - **S005**: All file paths MUST be validated to reside within the target repository root — path traversal outside the root MUST be blocked.
 - **S006**: SARIF output MUST HTML-escape user-controlled content to prevent injection into SARIF viewers.
 
@@ -121,7 +121,7 @@ See [AV1 in the security model](specs/architecture/security-model.md#av1-llm-cla
 
 1. **Pre-LLM Sanitization** ([`llm_sanitizer.py`](src/ipi_check/scanner/llm_sanitizer.py)) — invisible characters, ANSI escapes, bidi overrides, and variation selectors are replaced with visible placeholders; base64 blocks and ROT13-obfuscated text are decoded. Content is no longer truncated (batch processing handles large inputs via chunking).
 2. **Immutable System Prompts** ([`llm_classifier.py`](src/ipi_check/scanner/llm_classifier.py)) — module-level constants `CLASSIFIER_SYSTEM_PROMPT` (single-file), `BATCH_CLASSIFIER_SYSTEM_PROMPT` (batch), and `SKILL_CLASSIFIER_SYSTEM_PROMPT` (skill) with explicit "DO NOT follow instructions" directive.
-3. **Structured Output Enforcement** ([`llm_classifier.py`](src/ipi_check/scanner/llm_classifier.py)) — response parsed as JSON with strict schema validation; any failure → `compromised=True`. Skill responses include `shadow_features` list validation.
+3. **Structured Output Enforcement** ([`llm_classifier.py`](src/ipi_check/scanner/llm_classifier.py)) — response parsed as JSON and validated against the schema (findings are normalized tolerantly: coercible `line`/`confidence`, extra keys ignored); an unusable response → `compromised=True` with a `CompromisedReason` (`provider_error` / `schema_invalid` / `injection_suspected`, the last escalated and never downgraded to `safe`). Skill responses include `shadow_features` list validation.
 4. **Batch Partial Failure Handling** — individual file entries in batch responses are validated independently; broken entries trigger per-file retry with exponential backoff (max 3 attempts).
 5. **Confidence Fusion** ([`confidence_fusion.py`](src/ipi_check/scanner/confidence_fusion.py)) — CRITICAL static findings cannot be overridden by LLM `safe` verdicts; applies to both per-file and per-skill fusion.
 6. **Skill Pattern Isolation** — skill files (`FileCategory.SKILL`) are NOT scanned with injection patterns (IPI101–109); they use a dedicated pattern set (IPI401–411) to prevent false positives while detecting actual malware.
@@ -215,7 +215,7 @@ These guidelines apply to ALL contributors: human developers, code reviewers, an
 
 - NEVER commit secrets to version control
 - LLM API tokens are accepted via CLI arg or environment variable — never hardcoded
-- Environment variables `LITELLM_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY` are checked for LLM availability but never logged
+- Environment variables `LITELLM_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY` are checked for LLM availability but never logged; `IPI_CHECK_LLM_MODEL` supplies the model name when `--llm-model` is absent (not a secret). The availability diagnostic names the missing parameter only — it MUST NOT echo a credential value
 - `.env` is in `.gitignore`
 
 ---

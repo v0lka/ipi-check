@@ -6,6 +6,7 @@ from pathlib import Path
 from ipi_check.core.types import (
     ByteFinding,
     ByteFindingCategory,
+    CompromisedReason,
     DiscoveredFile,
     FileCategory,
     HeuristicScores,
@@ -68,8 +69,19 @@ def _static(
     )
 
 
-def _llm(verdict: str, confidence: float, *, compromised: bool = False) -> LLMResult:
-    return LLMResult(verdict=verdict, confidence=confidence, compromised=compromised)
+def _llm(
+    verdict: str,
+    confidence: float,
+    *,
+    compromised: bool = False,
+    reason: CompromisedReason | None = None,
+) -> LLMResult:
+    return LLMResult(
+        verdict=verdict,
+        confidence=confidence,
+        compromised=compromised,
+        compromised_reason=reason,
+    )
 
 
 class TestFuseVerdicts:
@@ -160,3 +172,93 @@ class TestFuseVerdicts:
         assert a.decision == b.decision
         assert a.reasoning == b.reasoning
         assert a.static_severity == b.static_severity
+
+
+class TestInjectionSuspectedEscalation:
+    """An injection-suspected compromised LLM must never yield PASS (IN-15)."""
+
+    def test_injection_suspected_none_severity_reviews(self, tmp_path: Path) -> None:
+        sr = _static(tmp_path, Severity.NONE)
+        suspected = _llm(
+            "safe", 0.0,
+            compromised=True,
+            reason=CompromisedReason.INJECTION_SUSPECTED,
+        )
+        result = fuse_verdicts(sr, suspected)
+        assert result.decision == VerdictDecision.REVIEW_REQUIRED
+        assert result.decision != VerdictDecision.PASS
+        assert result.llm_compromised is True
+        assert "inject" in result.reasoning.lower()
+
+    def test_plain_provider_error_none_severity_still_passes(self, tmp_path: Path) -> None:
+        """A mere provider error is not an attack signal → static-only PASS."""
+        sr = _static(tmp_path, Severity.NONE)
+        failed = _llm(
+            "safe", 0.0,
+            compromised=True,
+            reason=CompromisedReason.PROVIDER_ERROR,
+        )
+        result = fuse_verdicts(sr, failed)
+        assert result.decision == VerdictDecision.PASS
+
+    def test_injection_suspected_does_not_downgrade_review(self, tmp_path: Path) -> None:
+        sr = _static(tmp_path, Severity.MEDIUM, byte=[_byte(Severity.MEDIUM)])
+        suspected = _llm(
+            "safe", 0.0,
+            compromised=True,
+            reason=CompromisedReason.INJECTION_SUSPECTED,
+        )
+        result = fuse_verdicts(sr, suspected)
+        assert result.decision == VerdictDecision.REVIEW_REQUIRED
+
+
+class TestFramedAgentFindingFloor:
+    """A framed (example-region-capped) finding in an agent-instruction file
+    must never fuse to PASS: the framing there is attacker-writable prose, so
+    a fooled "safe" LLM verdict cannot silence it (ADR-007)."""
+
+    def _framed_pattern(self, severity: Severity) -> PatternFinding:
+        return PatternFinding(
+            category=PatternFindingCategory.INSTRUCTION_OVERRIDE,
+            severity=severity,
+            line=1,
+            column=1,
+            matched_text="x",
+            pattern_id="P1",
+            description="d",
+            framed=True,
+        )
+
+    def test_framed_medium_with_safe_llm_is_review(self, tmp_path: Path) -> None:
+        sr = _static(
+            tmp_path, Severity.MEDIUM, patt=[self._framed_pattern(Severity.MEDIUM)]
+        )
+        assert fuse_verdicts(sr, _llm("safe", 0.99)).decision == VerdictDecision.REVIEW_REQUIRED
+
+    def test_framed_medium_static_only_is_review(self, tmp_path: Path) -> None:
+        sr = _static(
+            tmp_path, Severity.MEDIUM, patt=[self._framed_pattern(Severity.MEDIUM)]
+        )
+        assert fuse_verdicts(sr, None).decision == VerdictDecision.REVIEW_REQUIRED
+
+    def test_unframed_medium_with_safe_llm_still_passes(self, tmp_path: Path) -> None:
+        sr = _static(tmp_path, Severity.MEDIUM, patt=[_pattern(Severity.MEDIUM)])
+        assert fuse_verdicts(sr, _llm("safe", 0.9)).decision == VerdictDecision.PASS
+
+    def test_framed_source_file_not_floored(self, tmp_path: Path) -> None:
+        # The floor is scoped to agent-instruction files: a framed [STR]
+        # finding in source code keeps the ordinary matrix (MEDIUM + safe ->
+        # PASS) — the string literal is syntactically data, not framing prose.
+        p = tmp_path / "f.js"
+        p.write_text("x")
+        sr = StaticResult(
+            file=DiscoveredFile(
+                path=p, category=FileCategory.SOURCE_CODE,
+                relative_path="f.js", size_bytes=1,
+            ),
+            byte_findings=[],
+            pattern_findings=[self._framed_pattern(Severity.MEDIUM)],
+            heuristic_scores=_scores(),
+            severity=Severity.MEDIUM,
+        )
+        assert fuse_verdicts(sr, _llm("safe", 0.9)).decision == VerdictDecision.PASS

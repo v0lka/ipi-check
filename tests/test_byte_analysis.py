@@ -11,6 +11,15 @@ from ipi_check.core.types import (
 )
 from ipi_check.scanner.byte_analysis import analyze_bytes
 
+# Regression fixtures for FP-1 (roadmap T6.1): legitimate Cyrillic documents
+# (.md and .js) that must NOT trigger IPI006, plus one genuine homoglyph attack.
+FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures" / "cyrillic"
+
+# Regression fixtures for FP-2 (roadmap T0.2): a document with ordinary emoji
+# (which must NOT trigger IPI003) and a hidden U+FE00 variation-selector
+# channel (which must).
+VS_FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures" / "variation-selectors"
+
 
 def _make_file(tmp_path: Path) -> DiscoveredFile:
     p = tmp_path / "x.md"
@@ -88,32 +97,27 @@ class TestAnalyzeBytes:
         cats = _categories(findings, Severity.MEDIUM)
         assert ByteFindingCategory.PUA in cats
 
-    def test_homoglyphs_in_latin_text_flagged(self, tmp_path: Path) -> None:
+    def test_latin_token_with_cyrillic_homoglyphs_flagged(self, tmp_path: Path) -> None:
         f = _make_file(tmp_path)
-        # Mostly Latin, with sprinkled Cyrillic homoglyphs (ratio > 0.05).
+        # A Latin word with Cyrillic а/е spliced into the same token.
         text = "Hello" + "а" + "world" + "е" + "test"  # noqa: RUF001
         findings = analyze_bytes(f, text.encode("utf-8"))
-        cats = _categories(findings, Severity.MEDIUM)
-        assert ByteFindingCategory.HOMOGLYPH in cats
+        homoglyphs = [
+            x for x in findings if x.category == ByteFindingCategory.HOMOGLYPH
+        ]
+        assert len(homoglyphs) == 1
+        assert homoglyphs[0].severity == Severity.MEDIUM
 
     def test_russian_only_text_not_flagged(self, tmp_path: Path) -> None:
         f = _make_file(tmp_path)
-        # Pure Cyrillic prose — no Latin letters → ratio threshold is computed
-        # over (latin + cyrillic-homoglyphs); if all chars are homoglyphs
-        # the ratio is 1.0 and would trigger. So we use NON-homoglyph
-        # Cyrillic letters which the homoglyph map doesn't contain.
+        # Pure Cyrillic prose (plus standalone Latin words) never mixes scripts
+        # *within* a token → no homoglyph finding.
         text = "Привет, как дела? Это README по-русски."
         findings = analyze_bytes(f, text.encode("utf-8"))
-        # Not all Cyrillic letters are in HOMOGLYPH_MAP — text should pass.
-        # Even if a few homoglyph letters appear, ratio over (latin=0 + cyr_h)
-        # would be 1.0; we picked text without homoglyph letters.
         homoglyph_findings = [
             x for x in findings if x.category == ByteFindingCategory.HOMOGLYPH
         ]
-        # Verify the text doesn't accidentally contain mapped chars:
-        from ipi_check.scanner.byte_analysis import HOMOGLYPH_MAP
-        if not any(c in HOMOGLYPH_MAP for c in text):
-            assert homoglyph_findings == []
+        assert homoglyph_findings == []
 
     def test_line_column_resolution(self, tmp_path: Path) -> None:
         f = _make_file(tmp_path)
@@ -138,3 +142,138 @@ class TestAnalyzeBytes:
         assert findings
         assert all(isinstance(x.snippet_hex, str) for x in findings)
         assert findings[0].snippet_hex.startswith("1b5b386d")
+
+
+class TestHomoglyphMixedScriptRegression:
+    """FP-1 / T0.1 — homoglyph detection at token granularity (T6.1 fixtures)."""
+
+    def test_cyrillic_markdown_no_ipi006(self, tmp_path: Path) -> None:
+        raw = (FIXTURES_DIR / "README_ru.md").read_bytes()
+        findings = analyze_bytes(_make_file(tmp_path), raw)
+        assert [
+            x for x in findings if x.category == ByteFindingCategory.HOMOGLYPH
+        ] == []
+
+    def test_cyrillic_javascript_no_ipi006(self, tmp_path: Path) -> None:
+        raw = (FIXTURES_DIR / "app_ru.js").read_bytes()
+        findings = analyze_bytes(_make_file(tmp_path), raw)
+        assert [
+            x for x in findings if x.category == ByteFindingCategory.HOMOGLYPH
+        ] == []
+
+    def test_homoglyph_attack_fixture_detected(self, tmp_path: Path) -> None:
+        raw = (FIXTURES_DIR / "homoglyph_attack.md").read_bytes()
+        findings = analyze_bytes(_make_file(tmp_path), raw)
+        homoglyphs = [
+            x for x in findings if x.category == ByteFindingCategory.HOMOGLYPH
+        ]
+        assert len(homoglyphs) == 1
+        assert homoglyphs[0].severity == Severity.MEDIUM
+
+    def test_at_most_one_finding_per_file(self, tmp_path: Path) -> None:
+        # Many mixed-script tokens must still collapse to a single finding.
+        text = "Pаypal Gооgle sесret аpple еxample оrange " * 20  # noqa: RUF001
+        findings = analyze_bytes(_make_file(tmp_path), text.encode("utf-8"))
+        homoglyphs = [
+            x for x in findings if x.category == ByteFindingCategory.HOMOGLYPH
+        ]
+        assert len(homoglyphs) == 1
+
+    def test_mixed_scripts_without_confusable_is_low(self, tmp_path: Path) -> None:
+        # Latin letters spliced with non-confusable Cyrillic (ж) — no
+        # Latin-lookalike present → severity downgraded to LOW.
+        findings = analyze_bytes(_make_file(tmp_path), "helloжworld".encode())
+        homoglyphs = [
+            x for x in findings if x.category == ByteFindingCategory.HOMOGLYPH
+        ]
+        assert len(homoglyphs) == 1
+        assert homoglyphs[0].severity == Severity.LOW
+
+    def test_pure_latin_and_pure_cyrillic_not_flagged(self, tmp_path: Path) -> None:
+        for text in ("plain latin text only", "Чисто русский текст без латиницы"):
+            findings = analyze_bytes(_make_file(tmp_path), text.encode("utf-8"))
+            assert [
+                x for x in findings if x.category == ByteFindingCategory.HOMOGLYPH
+            ] == []
+
+    def test_sarif_ipi006_capped_and_absent_for_cyrillic(self, tmp_path: Path) -> None:
+        """End-to-end: Cyrillic docs yield no IPI006; the attack yields one."""
+        from ipi_check import TOOL_INFO
+        from ipi_check.reporter.sarif_reporter import generate_sarif
+        from ipi_check.scanner.pipeline import run_pipeline
+
+        for name in ("README_ru.md", "app_ru.js", "homoglyph_attack.md"):
+            (tmp_path / name).write_bytes((FIXTURES_DIR / name).read_bytes())
+
+        verdicts, _skill_verdicts = run_pipeline(tmp_path, llm_config=None, quiet=True)
+        sarif = generate_sarif(
+            verdicts,
+            tmp_path,
+            TOOL_INFO,
+            "2024-01-01T00:00:00Z",
+            "2024-01-01T00:00:01Z",
+        )
+        counts: dict[str, int] = {}
+        for result in sarif["runs"][0]["results"]:
+            if result["ruleId"] != "IPI006":
+                continue
+            uri = result["locations"][0]["physicalLocation"]["artifactLocation"]["uri"]
+            counts[uri] = counts.get(uri, 0) + 1
+
+        assert counts.get("README_ru.md", 0) == 0
+        assert counts.get("app_ru.js", 0) == 0
+        assert counts.get("homoglyph_attack.md", 0) == 1
+        assert all(count <= 1 for count in counts.values())
+
+
+def _vs_findings(findings: list) -> list:
+    return [x for x in findings if x.category == ByteFindingCategory.VARIATION_SELECTORS]
+
+
+class TestVariationSelectorPresentation:
+    """FP-2 / T0.2 — the U+FE0F emoji presentation selector must not trigger IPI003."""
+
+    def test_emoji_doc_fixture_no_ipi003(self, tmp_path: Path) -> None:
+        raw = (VS_FIXTURES_DIR / "emoji_doc.md").read_bytes()
+        findings = analyze_bytes(_make_file(tmp_path), raw)
+        assert _vs_findings(findings) == []
+
+    def test_fe00_channel_fixture_detected(self, tmp_path: Path) -> None:
+        raw = (VS_FIXTURES_DIR / "fe00_channel.md").read_bytes()
+        findings = analyze_bytes(_make_file(tmp_path), raw)
+        asserted = _vs_findings(findings)
+        assert asserted
+        assert all(x.severity == Severity.HIGH for x in asserted)
+
+    def test_emoji_presentation_selector_with_base_not_flagged(self, tmp_path: Path) -> None:
+        # ⚠ (U+26A0) + U+FE0F is legitimate emoji presentation.
+        raw = "\u26a0\ufe0f warning".encode("utf-8")
+        findings = analyze_bytes(_make_file(tmp_path), raw)
+        assert _vs_findings(findings) == []
+
+    def test_small_emoji_count_not_flagged(self, tmp_path: Path) -> None:
+        raw = "\u26a0\ufe0f ok \u2705 done \u2764\ufe0f".encode("utf-8")
+        findings = analyze_bytes(_make_file(tmp_path), raw)
+        assert _vs_findings(findings) == []
+
+    def test_fe0f_without_emoji_base_flagged(self, tmp_path: Path) -> None:
+        # U+FE0F after a plain Latin letter has no emoji base → suspicious.
+        raw = "text\ufe0fmore".encode("utf-8")
+        findings = analyze_bytes(_make_file(tmp_path), raw)
+        asserted = _vs_findings(findings)
+        assert asserted
+        assert all(x.severity == Severity.HIGH for x in asserted)
+
+    def test_fe0f_anomalous_density_flagged(self, tmp_path: Path) -> None:
+        # Every selector follows an emoji base, but the file is saturated with
+        # them — a steganographic encoding channel, not ordinary emoji usage.
+        raw = ("\u26a0\ufe0f" * 40).encode("utf-8")
+        findings = analyze_bytes(_make_file(tmp_path), raw)
+        assert _vs_findings(findings)
+
+    def test_duplicate_byte_findings_deduped(self, tmp_path: Path) -> None:
+        # \x1b[8m matches both the generic ANSI pattern and the hide pattern;
+        # the identical findings must collapse to a single one.
+        findings = analyze_bytes(_make_file(tmp_path), b"\x1b[8mfoo")
+        ansi = [x for x in findings if x.category == ByteFindingCategory.ANSI_HIDDEN]
+        assert len(ansi) == 1

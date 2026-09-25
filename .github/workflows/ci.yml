@@ -15,7 +15,7 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install ruff
-      - run: ruff check src/ tests/
+      - run: ruff check src/ tests/ scripts/
 
   type-check:
     runs-on: ubuntu-latest
@@ -40,6 +40,51 @@ jobs:
       - run: pip install -e ".[dev]"
       - run: pytest tests/ -v --tb=short
 
+  metrics:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e ".[dev]"
+      - name: Precision/recall gate (T6.2)
+        run: >
+          python scripts/ipi_metrics.py
+          --manifest samples/metrics-corpus/manifest.json
+          --baseline samples/metrics-corpus/baseline.json
+          --min-precision 1.0
+          --min-recall 1.0
+          --json "$RUNNER_TEMP/ipi-metrics.json"
+      - name: Publish metrics report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ipi-metrics
+          path: ${{ runner.temp }}/ipi-metrics.json
+          if-no-files-found: warn
+
+  self-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install the scanner and the SARIF validator dependency
+        run: pip install -e ".[dev]" jsonschema
+      - name: Dogfood — scan this repository (T6.3)
+        run: ipi-check scan . --output "$RUNNER_TEMP/self-scan.sarif"
+      - name: Validate SARIF against the 2.1.0 schema (T6.3)
+        run: python scripts/validate_sarif.py "$RUNNER_TEMP/self-scan.sarif"
+      - name: Upload the SARIF report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: self-scan-sarif
+          path: ${{ runner.temp }}/self-scan.sarif
+          if-no-files-found: warn
+
   dependency-scan:
     runs-on: ubuntu-latest
     steps:
@@ -62,8 +107,149 @@ jobs:
 
   docker:
     runs-on: ubuntu-latest
-    needs: [lint, type-check, test]
+    needs: [lint, type-check, test, metrics]
     steps:
       - uses: actions/checkout@v4
       - run: docker build -t ipi-check .
       - run: docker run ipi-check --version
+
+  # T5.5 - dogfood the published image: build it, scan this repository through
+  # the container, and exercise the optional --llm-* classifier against a mock
+  # OpenAI-compatible endpoint so the container's LLM path is covered
+  # end-to-end without contacting a real provider.
+  docker-smoke:
+    name: Docker smoke (dogfood)
+    runs-on: ubuntu-latest
+    needs: [docker]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the container image
+        run: docker build -t ipi-check .
+
+      - name: Smoke - static dogfood scan through the container
+        run: |
+          mkdir -p "$RUNNER_TEMP/report"
+          docker run --rm \
+            -v "$PWD:/repo:ro" \
+            -v "$RUNNER_TEMP/report:/out" \
+            ipi-check scan /repo --quiet --output /out/self-scan.sarif
+          test -s "$RUNNER_TEMP/report/self-scan.sarif"
+          python3 -c "import json,sys; d=json.load(open(sys.argv[1])); assert d['version']=='2.1.0', d.get('version'); print('container SARIF ok:', d['version'])" "$RUNNER_TEMP/report/self-scan.sarif"
+
+      - name: Smoke - container scan with --llm-* against a mock endpoint
+        run: |
+          set -euo pipefail
+
+          # A tiny repository for the scanner to chew on.
+          mkdir -p "$RUNNER_TEMP/smoke-repo"
+          printf '# Agent rules\n\nBe concise.\n' > "$RUNNER_TEMP/smoke-repo/AGENTS.md"
+          printf '# Cursor rules\n\nAlways write tests.\n' > "$RUNNER_TEMP/smoke-repo/.cursorrules"
+
+          # Driver executed *inside* the image: it starts a mock
+          # OpenAI-compatible endpoint on loopback, runs `ipi-check` with
+          # --llm-base-url pointing at it, and asserts a real LLM round-trip.
+          cat > "$RUNNER_TEMP/smoke_driver.py" <<'PY'
+          import json
+          import os
+          import socket
+          import subprocess
+          import sys
+          import threading
+          import time
+          from http.server import BaseHTTPRequestHandler, HTTPServer
+
+          PORT = 8765
+          REQUESTS = []
+          PAYLOAD = json.dumps({"verdict": "safe", "confidence": 1.0, "findings": []})
+
+
+          class Handler(BaseHTTPRequestHandler):
+              def do_POST(self):
+                  self.rfile.read(int(self.headers.get("Content-Length", 0)))
+                  REQUESTS.append(self.path)
+                  body = json.dumps(
+                      {
+                          "id": "chatcmpl-mock",
+                          "object": "chat.completion",
+                          "created": 0,
+                          "model": "gpt-4o-mini",
+                          "choices": [
+                              {
+                                  "index": 0,
+                                  "finish_reason": "stop",
+                                  "message": {"role": "assistant", "content": PAYLOAD},
+                              }
+                          ],
+                          "usage": {
+                              "prompt_tokens": 1,
+                              "completion_tokens": 1,
+                              "total_tokens": 2,
+                          },
+                      }
+                  ).encode()
+                  self.send_response(200)
+                  self.send_header("Content-Type", "application/json")
+                  self.send_header("Content-Length", str(len(body)))
+                  self.end_headers()
+                  self.wfile.write(body)
+
+              def log_message(self, *args):
+                  pass
+
+
+          def main():
+              server = HTTPServer(("127.0.0.1", PORT), Handler)
+              threading.Thread(target=server.serve_forever, daemon=True).start()
+
+              deadline = time.time() + 30
+              while time.time() < deadline:
+                  with socket.socket() as sock:
+                      sock.settimeout(0.2)
+                      if sock.connect_ex(("127.0.0.1", PORT)) == 0:
+                          break
+                  time.sleep(0.2)
+              else:
+                  print("mock LLM endpoint did not start", file=sys.stderr)
+                  return 1
+
+              report = "/repo/llm.sarif"
+              proc = subprocess.run(
+                  [
+                      "ipi-check",
+                      "scan",
+                      "/repo",
+                      "--llm-base-url",
+                      f"http://127.0.0.1:{PORT}/v1",
+                      "--llm-model",
+                      "openai/gpt-4o-mini",
+                      "--llm-api-token",
+                      "dummy",
+                      "--quiet",
+                      "--output",
+                      report,
+                  ],
+                  check=False,
+              )
+              if proc.returncode != 0:
+                  print(f"ipi-check exited {proc.returncode}", file=sys.stderr)
+                  return 1
+              if not (os.path.exists(report) and os.path.getsize(report) > 0):
+                  print("no report written", file=sys.stderr)
+                  return 1
+              if not any(path.endswith("/chat/completions") for path in REQUESTS):
+                  print(f"LLM endpoint was never called: {REQUESTS}", file=sys.stderr)
+                  return 1
+              print(f"LLM smoke OK - {len(REQUESTS)} call(s) to the mock endpoint")
+              return 0
+
+
+          if __name__ == "__main__":
+              raise SystemExit(main())
+          PY
+
+          docker run --rm \
+            -v "$RUNNER_TEMP/smoke-repo:/repo" \
+            -v "$RUNNER_TEMP/smoke_driver.py:/smoke_driver.py:ro" \
+            --entrypoint python3 \
+            ipi-check /smoke_driver.py

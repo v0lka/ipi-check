@@ -11,6 +11,7 @@ Locate all files in a repository that may contain indirect prompt injection payl
 | `repo_path` | `Path` | CLI argument | Absolute or relative path to the repository root |
 | `respect_gitignore` | `bool` | CLI argument (`--no-gitignore` inverts) | Whether to honor `.gitignore` patterns (default: True) |
 | `exclude_patterns` | `list[str] \| None` | CLI argument (`--exclude`) | User-specified exclude glob patterns (gitwildmatch syntax) |
+| `max_file_size` | `int` | CLI argument (`--max-file-size`) | Byte ceiling above which a file is skipped (default: `MAX_FILE_SIZE_BYTES` = 10 MB) |
 
 ## Output
 
@@ -79,19 +80,30 @@ Before category matching, discovered paths are filtered through two exclusion me
 
 #### Gitignore Exclusion (default: enabled)
 
-When `respect_gitignore=True` and `{repo_path}/.gitignore` exists:
-- Parse the file using `gitwildmatch` syntax (via `pathspec` library)
-- Files matching any pattern are excluded from discovery
-- Directory patterns (e.g., `node_modules/`) prune the walk tree early for performance
-- If `.gitignore` does not exist or cannot be read, proceed silently without gitignore filtering
+When `respect_gitignore=True`, **every** `.gitignore` in the tree is honoured
+with git semantics:
+
+- Each ignore file is parsed with `gitwildmatch` syntax (via `pathspec`) and
+  **scoped to the directory that contains it** — its patterns are matched
+  against paths relative to that directory.
+- Verdicts are evaluated from the repository root downwards and a deeper
+  `.gitignore` overrides a shallower one. A nested `!keep.py` can therefore
+  re-include a file that a root-level `*.py` rule excluded.
+- Files matching any pattern are excluded from discovery.
+- Directory patterns (e.g., `node_modules/`) prune the walk tree early for
+  performance.
+- Ignore files are read lazily and cached per directory; a missing or
+  unreadable file is skipped silently (its scope simply contributes no rules).
+
+`--no-gitignore` disables the mechanism entirely — no `.gitignore` is read.
 
 #### User Exclude Patterns
 
 When `exclude_patterns` is non-empty:
-- Build a `pathspec.PathSpec` from the patterns using `gitwildmatch` syntax
+- Build a `pathspec.PathSpec` from the patterns using `gitwildmatch` syntax, matched against repo-root-relative paths
 - Files and directories matching any pattern are excluded
 - Directory patterns prune the walk tree early
-- Applied in addition to gitignore exclusions (both must pass for a file to be included)
+- Applied in addition to gitignore exclusions (a file is excluded when either mechanism matches)
 
 Both exclusion filters are applied BEFORE category matching — an excluded file never reaches the categorization step, regardless of whether it would match as an agent instruction file, dot-directory markdown, or source code.
 
@@ -137,6 +149,7 @@ Skill files are **not** subject to regular pattern matching — they pass throug
 | Empty repository (no matching files) | Return empty list; scanner exits with code 0 and message "No files to scan" |
 | Symbolic links | Follow symlink; validate resolved path is within repo root; if outside, skip with warning |
 | Binary files detected by extension | Skip `.png`, `.jpg`, `.pdf`, `.exe`, `.dll`, `.so`, `.dylib`, `.class`, `.pyc`, `.o`, `.obj`, `.zip`, `.tar`, `.gz`, `.bin` |
+| Binary payload detected by content sniff | Second barrier after the extension check: a file whose first 8 KiB starts with a known binary container magic header — **only prefixes whose leading bytes are control/high-bit bytes** (ZIP archives, TrueType fonts, PNG/JPEG images, ELF/Mach-O objects, WASM, gzip/xz/7z archives, legacy Office, ICO) — is skipped, and only for files whose name carries no text signal (extensionless/unrecognized assets). Two rules are absolute: a NUL byte is **never** a drop signal (an interpreter executes a script with an embedded `\x00`), and neither is a purely-ASCII prefix (`true`, `wOFF`, `RIFF`, `%PDF`, `BZh`, …) — a shell keeps executing after an unparseable first line, so an ASCII "magic" can open a functional script. Text-named files (agent instructions, dot-dir markdown, `SKILL.md`, source code) never pass through the sniff at all, so a prepended magic cannot remove an injection-bearing text file either |
 | Files exceeding `MAX_FILE_SIZE_BYTES` | Skip with warning: "Skipping large file: {path} ({size} bytes)" |
 | `.git/` directory | Always excluded from scanning |
 | `.gitignore` does not exist | Silently proceed without gitignore exclusion — no error |
@@ -152,7 +165,9 @@ Skill files are **not** subject to regular pattern matching — they pass throug
 ## Configuration Constants
 
 ```python
-# File size limit: skip files larger than this
+# Default file size limit — files larger than this are skipped with a warning.
+# The `--max-file-size` CLI flag overrides it per scan (passed to
+# `discover_files` as the `max_file_size` parameter).
 MAX_FILE_SIZE_BYTES: int = 10 * 1024 * 1024  # 10 MB
 
 # Filename that triggers skill discovery
@@ -198,10 +213,10 @@ GITIGNORE_FILENAME: str = ".gitignore"
 
 - **D001**: Every returned `DiscoveredFile.path` MUST be an absolute path that resides within `repo_path`.
 - **D002**: No file from `.git/` directory MUST appear in the output.
-- **D003**: Binary files (by extension) MUST be excluded.
+- **D003**: Binary files MUST be excluded by extension, or — only for files whose name carries no text signal — by a content sniff that recognizes binary **container magic headers**. A NUL byte MUST NOT exclude any file, text-named or not: an interpreter runs a script with an embedded NUL, so a NUL-based drop is a one-byte evasion oracle. A magic header may only exclude a file whose bytes make it unusable as a script or document.
 - **D004**: The output list MUST NOT contain duplicate paths (same file discovered via multiple rules).
-- **D005**: Files exceeding `MAX_FILE_SIZE_BYTES` MUST be skipped with a warning logged.
-- **D006**: When `respect_gitignore=True` and `.gitignore` exists, files matching `.gitignore` patterns MUST be excluded from the output.
+- **D005**: Files exceeding the effective size limit (`max_file_size`, default `MAX_FILE_SIZE_BYTES`) MUST be skipped with a warning logged.
+- **D006**: When `respect_gitignore=True`, EVERY `.gitignore` in the tree MUST be honoured with git semantics — patterns matched relative to the directory that owns the ignore file, with deeper files overriding shallower ones — and matching files MUST be excluded from the output.
 - **D007**: `--exclude` patterns MUST exclude files regardless of their category — even agent instruction files are subject to user-specified exclusion.
 - **D008**: Exclusion filters MUST be applied BEFORE category matching to avoid unnecessary processing.
 - **D009**: Files within a skill directory MUST be re-categorized to `FileCategory.SKILL` and excluded from the non-skill file list — they MUST NOT appear in both outputs.

@@ -6,6 +6,15 @@ import binascii
 import re
 from typing import TYPE_CHECKING
 
+from ipi_check.core.invisible import (
+    ANSI_ESCAPE_PATTERN,
+    BIDI_PATTERN,
+    LINE_SEPARATOR_PATTERN,
+    UNICODE_TAGS_PATTERN,
+    VARIATION_SELECTOR_PATTERN,
+    ZERO_WIDTH_PATTERN,
+)
+
 if TYPE_CHECKING:
     from ipi_check.core.types import ByteFinding
 
@@ -33,26 +42,13 @@ _TEXT_DECODE_ENCODING: str = "utf-8"
 _TEXT_DECODE_ERRORS: str = "replace"
 
 # ---------------------------------------------------------------------------
-# Patterns for invisible / suspicious content
+# Patterns for suspicious (non-invisible) content
 # ---------------------------------------------------------------------------
-
-#: Unicode tag block (U+E0000-U+E007F) — invisible metadata channel.
-_UNICODE_TAGS_PATTERN: re.Pattern[str] = re.compile(r"[\U000e0000-\U000e007f]")
-
-#: Zero-width / formatting block (U+200B-U+200F).
-_ZERO_WIDTH_PATTERN: re.Pattern[str] = re.compile(r"[\u200b-\u200f]")
-
-#: Line/paragraph separator (U+2028-U+2029).
-_LINE_SEPARATOR_PATTERN: re.Pattern[str] = re.compile(r"[\u2028\u2029]")
-
-#: Bidi override block (U+202A-U+202E).
-_BIDI_OVERRIDE_PATTERN: re.Pattern[str] = re.compile(r"[\u202a-\u202e]")
-
-#: Variation selector block (U+FE00-U+FE0F).
-_VARIATION_SELECTOR_PATTERN: re.Pattern[str] = re.compile(r"[\ufe00-\ufe0f]")
-
-#: ANSI escape sequence: ``ESC [ ... <final-letter>``.
-_ANSI_ESCAPE_PATTERN: re.Pattern[str] = re.compile(r"\x1b\[[^A-Za-z]*[A-Za-z]")
+#
+# The invisible-character patterns (ANSI escapes, Unicode tags, zero-width,
+# line/paragraph separators, bidi controls, variation selectors) are the single
+# source of truth in ``ipi_check.core.invisible`` and imported above, so the
+# sanitizer can never drift from the strip pattern used elsewhere.
 
 #: Base64 detection — block of ≥40 valid base64 characters.
 BASE64_PATTERN: re.Pattern[str] = re.compile(r"[A-Za-z0-9+/=]{40,}")
@@ -162,13 +158,15 @@ def sanitize_content(raw_bytes: bytes, byte_findings: list[ByteFinding]) -> str:
 
     Steps:
         1. Decode bytes to UTF-8 (``errors="replace"``).
-        2. Replace invisible characters with visible placeholders:
-            * Unicode tags  (U+E0000-U+E007F) → ``[INVISIBLE:U+E00XX]``
-            * Zero-width    (U+200B-U+200F)   → ``[INVISIBLE:U+200X]``
-            * Line/para sep (U+2028-U+2029)   → ``[INVISIBLE:U+202X]``
-            * Bidi override (U+202A-U+202E)   → ``[BIDI:U+202X]``
-            * Variation     (U+FE00-U+FE0F)   → ``[VS:U+FE0X]``
-            * ANSI escapes                    → ``[ANSI:ESC]``
+        2. Replace invisible characters (defined in ``ipi_check.core.invisible``)
+           with visible placeholders:
+            * Unicode tags  (U+E0000-U+E007F)       → ``[INVISIBLE:U+E00XX]``
+            * Zero-width    (U+200B-U+200F)         → ``[INVISIBLE:U+200X]``
+            * Line/para sep (U+2028-U+2029)         → ``[INVISIBLE:U+202X]``
+            * Bidi controls (U+202A-U+202E,
+                             U+2066-U+2069)         → ``[BIDI:U+202X]``
+            * Variation     (U+FE00-U+FE0F)         → ``[VS:U+FE0X]``
+            * ANSI escapes                          → ``[ANSI:ESC]``
         3. Decode Base64 blocks (≥40 chars). Successful decodes become
            ``[DECODED_B64: ...]``; failed candidates are left untouched.
 
@@ -179,12 +177,12 @@ def sanitize_content(raw_bytes: bytes, byte_findings: list[ByteFinding]) -> str:
 
     text = raw_bytes.decode(_TEXT_DECODE_ENCODING, errors=_TEXT_DECODE_ERRORS)
 
-    text = _UNICODE_TAGS_PATTERN.sub(_replace_invisible, text)
-    text = _ZERO_WIDTH_PATTERN.sub(_replace_invisible, text)
-    text = _LINE_SEPARATOR_PATTERN.sub(_replace_invisible, text)
-    text = _BIDI_OVERRIDE_PATTERN.sub(_replace_bidi, text)
-    text = _VARIATION_SELECTOR_PATTERN.sub(_replace_variation_selector, text)
-    text = _ANSI_ESCAPE_PATTERN.sub(_replace_ansi, text)
+    text = UNICODE_TAGS_PATTERN.sub(_replace_invisible, text)
+    text = ZERO_WIDTH_PATTERN.sub(_replace_invisible, text)
+    text = LINE_SEPARATOR_PATTERN.sub(_replace_invisible, text)
+    text = BIDI_PATTERN.sub(_replace_bidi, text)
+    text = VARIATION_SELECTOR_PATTERN.sub(_replace_variation_selector, text)
+    text = ANSI_ESCAPE_PATTERN.sub(_replace_ansi, text)
 
     text = BASE64_PATTERN.sub(_replace_base64, text)
     text = _ROT13_CANDIDATE_PATTERN.sub(_replace_rot13, text)

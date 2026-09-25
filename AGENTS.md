@@ -107,11 +107,11 @@ Detects hidden content at byte level:
 
 - ANSI escape sequences (CRITICAL)
 - Unicode tag characters U+E0000–U+E007F (CRITICAL)
-- Variation selectors (HIGH)
+- Variation selectors (HIGH) — VS1–VS15 (U+FE00–U+FE0E) are always reported; the emoji presentation selector VS16 (U+FE0F) is exempt when it follows an emoji base at normal density
 - Bidi overrides U+202A–U+202E, U+2066–U+2069 (HIGH)
 - Zero-width characters (MEDIUM)
 - Private Use Area codepoints (MEDIUM)
-- Cyrillic homoglyphs at density >5% (MEDIUM)
+- Cyrillic homoglyphs — token-granular mixed-script detection, not a whole-file ratio (MEDIUM when a mixed-script token contains a Latin lookalike, LOW for script mixing alone; at most 1 finding per file)
 
 **Layer 3 — Pattern Matching** (`pattern_matching.py`)
 Regex-based detection with ReDoS protection (0.1s thread timeout per line):
@@ -131,15 +131,15 @@ Severity downgrade: non-agent `.md` files are capped at MEDIUM.
 
 ### Skill-specific patterns (IPI401–411, for skill files only):
 - Remote code execution (IPI401) — CRITICAL (`curl | bash`, `pickle.loads` with b64decode)
-- Credential harvesting (IPI402) — HIGH (sensitive env vars: `AWS_ACCESS_KEY_ID`, `GITHUB_TOKEN`, etc.)
-- External data transmission (IPI403) — CRITICAL (`curl`/`wget`/`requests.post` to external URLs)
-- Dynamic context abuse (IPI404) — HIGH (`!\`command\`` pattern)
+- Credential harvesting (IPI402) — HIGH (a credential env var is actually *read*: `AWS_ACCESS_KEY_ID`, `GITHUB_TOKEN`, etc.); CRITICAL when the read is co-located with an outbound sink on the same line (corroboration), refined back to HIGH when every URL host on the line is allowlisted. A bare variable mention or a non-credential accessor next to a URL is not flagged
+- External data transmission (IPI403) — context-dependent per URL: LOW when *every* host on the line is in `TRUSTED_DOMAINS`, MEDIUM baseline for unclassified hosts, CRITICAL for an exfil host (`evil`, `webhook`, `oast.*`, …) or when the file also reads a credential
+- Dynamic context abuse (IPI404) — LOW (`!`command`` is a legitimate skill feature; informational)
 - Excessive permissions (IPI405) — HIGH (wildcard in `allowed-tools`)
 - Obfuscated skill code (IPI406) — MEDIUM (`base64 -d`, `b64decode`, `atob()`)
 - Hidden HTML-comment instructions (IPI407) — HIGH
 - Command injection in body (IPI408) — CRITICAL
-- Secrecy/coercion (IPI409) — CRITICAL ("do NOT tell the user", "silently", "covertly")
-- Privilege escalation (IPI410) — CRITICAL (`sudo`, `chmod 7xx`, `chown root`)
+- Secrecy/coercion (IPI409) — CRITICAL for "do NOT tell/reveal … the user"-style concealment; HIGH for "without telling", "do not disclose", "covertly/secretly". A bare authority word (`MANDATORY`) or adverb (`silently`) is not secrecy
+- Privilege escalation (IPI410) — CRITICAL for an inherently destructive escalation (`sudo rm -rf`, `chmod 7xx`, `chown root`, `pkexec`); HIGH for a bare `sudo`; a prohibition-prefixed match ("do not use sudo") is dropped
 - Filesystem enumeration (IPI411) — MEDIUM (`find /`, `os.walk("/")`)
 
 Skill files (`FileCategory.SKILL`) skip regular `match_patterns()` entirely — they pass through `match_skill_patterns()` with this dedicated pattern set.
@@ -154,13 +154,14 @@ Skill files (`FileCategory.SKILL`) skip regular `match_patterns()` entirely — 
 **Layer 5 — Code Extraction** (`code_extractor.py`, `llm_sanitizer.py`)
 
 - Pygments-based: extracts only comments and string literals from source code
-- Falls back to full content when Pygments is unavailable or no comments found
+- Falls back to the full content (labelled per line, like extracted fragments) when Pygments is unavailable or no comments found
 - Sanitizer neutralizes invisible characters to visible placeholders, decodes base64 and ROT13
 - Sanitizer no longer truncates content (truncation removed to prevent payload evasion; batch processing handles large files via chunking)
 
 **Layer 6 — LLM Classification** (`llm_classifier.py`)
 
 - LiteLLM with strict JSON schema validation
+- Enabled only when a credential **and** a model both resolve (`is_llm_available`) — a credential without a model skips the phase up front instead of failing every call with `completion() missing ... 'model'` → `IPI900`
 - System prompt instructs the model to analyze, not follow
 - Single-file mode: per-file classification with `CLASSIFIER_SYSTEM_PROMPT`
 - Batch mode: multi-file classification for source code with `BATCH_CLASSIFIER_SYSTEM_PROMPT`
@@ -192,8 +193,8 @@ Decision matrix:
 ## Key Invariants
 
 1. **CRITICAL static severity always blocks** — LLM is not consulted for these files or skills (invariant I002).
-2. **Scanner always exits 0** on successful scan regardless of findings — the SARIF carries the verdicts.
-3. **Exit codes**: 0 = success, 1 = runtime error, 2 = usage error.
+2. **Default exit code is 0** on a completed scan regardless of findings (`--fail-on none`, the default) — the SARIF carries the verdicts; `--fail-on block|review` opts into policy exit codes (C002/C015).
+3. **Exit codes**: 0 = success (default policy), 1 = runtime error, 2 = usage error, 3 = `--fail-on block|review` tripped by a BLOCK verdict, 4 = `--fail-on review` tripped by a REVIEW_REQUIRED verdict (no BLOCK).
 4. **LLM result contamination**: if the LLM response fails JSON schema validation, it's marked `compromised=True` and static-only fallback is used.
 5. **Path traversal protection**: symlinks resolving outside the repo root are skipped with a warning.
 6. **Pre-LLM sanitization**: invisible characters are replaced with visible placeholders before sending to LLM — prevents the scanner itself from being prompt-injected.
@@ -211,6 +212,8 @@ Decision matrix:
 | IPI201–204  | Semantic heuristics          |
 | IPI301      | LLM findings                 |
 | IPI401–411  | Skill pattern matching       |
+| IPI501      | Skill heuristics             |
+| IPI601      | Skill LLM classification     |
 | IPI900      | LLM compromise               |
 
 CWE mappings: CWE-506 (embedded malicious code), CWE-451 (UI misrepresentation), CWE-1007 (insufficient visual distinction), CWE-77 (command injection).
@@ -283,14 +286,18 @@ docker run --rm -v "$(pwd):/repo" ipi-check scan /repo
 
 ```
 ipi-check scan REPO_PATH [--llm-model NAME] [--llm-api-token TOKEN]
-                         [--llm-base-url URL] [--output PATH]
-                         [--quiet] [--no-gitignore] [--exclude PAT]
+                         [--llm-base-url URL] [--output PATH] [--format FMT]
+                         [--fail-on POLICY] [--quiet] [--no-gitignore]
+                         [--exclude PAT]
 ```
 
 - `REPO_PATH` supports `${VAR}` expansion
 - `--output` writes compact JSON; stdout gets pretty-printed JSON
 - Warning emitted if `--output` extension is not `.sarif`
+- `--format` selects the renderer: `sarif` (default), `json`, `md`, `table`
+- `--fail-on {none,block,review}` controls the exit code: `none` (default) always exits 0 on a completed scan; `block` exits 3 on any BLOCK verdict; `review` exits 3 on BLOCK and 4 on REVIEW_REQUIRED-only
 - `--exclude` is repeatable, uses gitignore-style globs
+- The LLM phase requires **both** a credential (`--llm-api-token`, or `LITELLM_API_KEY` / `OPENAI_API_KEY` / `ANTHROPIC_API_KEY`) **and** a model (`--llm-model`, or `IPI_CHECK_LLM_MODEL`). `litellm.completion()` has no ambient default model, so a credential without one leaves the scan static-only (exit 0) with a stderr warning naming the missing parameter
 
 ---
 
@@ -311,8 +318,10 @@ ipi-check scan REPO_PATH [--llm-model NAME] [--llm-api-token TOKEN]
 | `LITELLM_API_KEY`           | Fallback LLM API key                        |
 | `OPENAI_API_KEY`            | Fallback LLM API key                        |
 | `ANTHROPIC_API_KEY`         | Fallback LLM API key                        |
+| `IPI_CHECK_LLM_MODEL`       | Fallback model name when `--llm-model` is not passed — without one of the two the LLM phase is skipped (LiteLLM has no default model) |
 | `IPI_CHECK_HOOK_DISABLE`    | Set to `1` to skip the git hook scan        |
 | `IPI_CHECK_BLOCK_ON_REVIEW` | Set to `1` to fail on REVIEW_REQUIRED       |
+| `IPI_CHECK_FAIL_ON`         | Explicit `--fail-on` value (`none`/`block`/`review`) for the git hook; overrides the shortcut above |
 | `IPI_CHECK_BIN`             | Override path to `ipi-check` binary in hook |
 
 ---

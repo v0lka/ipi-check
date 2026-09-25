@@ -1,0 +1,112 @@
+{
+  "version": 1,
+  "description": "Labeled metrics corpus for roadmap T6.2 (QA-2, QA-4). Every sample is either malicious ground truth (must be detected: at least one BLOCK) or benign ground truth (must NOT be over-flagged: zero BLOCK). Paths are repo-relative; a sample is either a directory scanned as its own repo root, or a single file staged into a temporary root under 'as'.",
+  "samples": [
+    {
+      "id": "malicious-credential-exfil",
+      "label": "malicious",
+      "root": "samples/malicious-skills/credential-exfil"
+    },
+    {
+      "id": "malicious-npm-backdoor",
+      "label": "malicious",
+      "root": "samples/malicious-skills/npm-backdoor"
+    },
+    {
+      "id": "malicious-reverse-shell",
+      "label": "malicious",
+      "root": "samples/malicious-skills/reverse-shell"
+    },
+    {
+      "id": "malicious-unicode-tag-backdoor",
+      "label": "malicious",
+      "root": "samples/ipi-injections/unicode-tag-backdoor"
+    },
+    {
+      "id": "malicious-miasm",
+      "label": "malicious",
+      "root": "samples/ipi-injections/miasm"
+    },
+    {
+      "id": "malicious-copilot-yolo",
+      "label": "malicious",
+      "root": "samples/ipi-injections/copilot-yolo"
+    },
+    {
+      "id": "malicious-nvidia-codex",
+      "label": "malicious",
+      "file": "samples/ipi-injections/nvidia-codex-agents.md",
+      "as": "AGENTS.md"
+    },
+    {
+      "id": "fp-cyrillic-readme",
+      "label": "benign",
+      "file": "samples/fp-corpus/cyrillic-docs/README_ru.md",
+      "as": "README_ru.md"
+    },
+    {
+      "id": "fp-cyrillic-architecture",
+      "label": "benign",
+      "file": "samples/fp-corpus/cyrillic-docs/architecture_ru.md",
+      "as": "architecture_ru.md"
+    },
+    {
+      "id": "fp-emoji-changelog",
+      "label": "benign",
+      "file": "samples/fp-corpus/emoji-docs/CHANGELOG.md",
+      "as": "CHANGELOG.md"
+    },
+    {
+      "id": "fp-contradiction-api-reference",
+      "label": "benign",
+      "file": "samples/fp-corpus/contradiction-docs/api-reference.md",
+      "as": "api-reference.md"
+    },
+    {
+      "id": "fp-dense-findings",
+      "label": "benign",
+      "file": "samples/fp-corpus/dense-findings.md",
+      "as": "dense-findings.md"
+    },
+    {
+      "id": "fp-security-tooling",
+      "label": "benign",
+      "root": "samples/fp-corpus/security-tooling"
+    },
+    {
+      "id": "fp-build-config",
+      "label": "benign",
+      "root": "samples/fp-corpus/build-config"
+    },
+    {
+      "id": "fp-binary-skill",
+      "label": "benign",
+      "root": "samples/fp-corpus/binary-skill"
+    },
+    {
+      "id": "fp-deploy-skill",
+      "label": "benign",
+      "root": "samples/fp-corpus/deploy-skill"
+    },
+    {
+      "id": "fp-quoted-frontmatter-skill",
+      "label": "benign",
+      "root": "samples/fp-corpus/quoted-frontmatter-skill"
+    },
+    {
+      "id": "fp-pass-heuristics",
+      "label": "benign",
+      "root": "samples/fp-corpus/pass-heuristics"
+    },
+    {
+      "id": "safe-ipi-injections",
+      "label": "benign",
+      "root": "samples/safe/ipi-injections"
+    },
+    {
+      "id": "safe-malicious-skills",
+      "label": "benign",
+      "root": "samples/safe/malicious-skills"
+    }
+  ]
+}

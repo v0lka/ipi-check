@@ -28,8 +28,8 @@ class HeuristicScores:
     invisible_suspicious: bool        # True if invisible_ratio > INVISIBLE_RATIO_THRESHOLD
     instruction_density: float        # Imperative verbs per paragraph
     instruction_density_suspicious: bool  # True if density > INSTRUCTION_DENSITY_THRESHOLD
-    contradiction_score: float        # Fraction of domains with polarity conflicts (0.0–1.0)
-    contradiction_suspicious: bool     # True if contradiction_score > CONTRADICTION_SCORE_THRESHOLD
+    contradiction_score: float        # Fraction of domains with polarity conflicts (0.0–1.0); 0.0 unless ≥ MIN_CONFLICTING_DOMAINS domains conflict
+    contradiction_suspicious: bool     # True if contradiction_score > CONTRADICTION_SCORE_THRESHOLD (≥2 domains must conflict)
     suspicious_count: int             # Number of triggered thresholds (0–4)
 ```
 
@@ -165,9 +165,10 @@ Detect mixed-polarity instructions within the same semantic domain — a techniq
    - `DISPENSATION` — waiver markers (does not apply, is waived, void, invalid, not enforced, overridden)
    - `NEUTRAL` — none of the above
 4. **Detect conflicts**: For each domain, if polarities are mixed (more than one polarity present, or `DISPENSATION` alone), the domain is flagged as conflicting.
-5. **Compute score**: \(\text{score} = \frac{\text{conflicting domains}}{\text{total populated domains}}\)
+5. **Require corroboration**: Fewer than `MIN_CONFLICTING_DOMAINS` (2) conflicting domains yields a score of `0.0`. A polarity flip confined to a single domain (e.g. "must apply" vs. "not applicable" in ordinary technical prose) is routine and is not treated as an injection signal.
+6. **Compute score**: \(\text{score} = \frac{\text{conflicting domains}}{\text{total populated domains}}\) (0.0 when fewer than two domains conflict).
 
-If \(\text{score} > \texttt{CONTRADICTION\_SCORE\_THRESHOLD}\) (0.0), the `contradiction_suspicious` flag is set — any evidence of mixed-polarity instructions triggers the heuristic.
+If \(\text{score} > \texttt{CONTRADICTION\_SCORE\_THRESHOLD}\) (0.5), the `contradiction_suspicious` flag is set — the contradiction must span at least two distinct domains.
 
 **Vocabulary sizes:**
 
@@ -209,8 +210,12 @@ INVISIBLE_RATIO_THRESHOLD: float = 0.1
 # Instruction density threshold — imperative verbs per paragraph
 INSTRUCTION_DENSITY_THRESHOLD: float = 3.0
 
-# Contradiction score threshold — any mixed-polarity domain triggers suspicion
-CONTRADICTION_SCORE_THRESHOLD: float = 0.0
+# Contradiction score threshold — the conflict must span ≥2 distinct domains
+CONTRADICTION_SCORE_THRESHOLD: float = 0.5
+
+# Minimum number of distinct conflicting domains required for the contradiction
+# heuristic (a single-domain polarity flip is not a signal)
+MIN_CONFLICTING_DOMAINS: int = 2
 
 # Imperative/instructive verbs to count (113 total: 63 EN + 30 RU + 20 CN)
 IMPERATIVE_VERBS: frozenset[str] = frozenset({
@@ -251,6 +256,7 @@ MIN_PARAGRAPH_SIZE: int = 50
 - **H003**: Instruction density MUST be computed per-paragraph (split by `\n\n+`), not per-file — a single dense paragraph among normal ones must be detectable.
 - **H004**: All thresholds MUST be defined as named module-level constants (`ENTROPY_THRESHOLD`, `INVISIBLE_RATIO_THRESHOLD`, `INSTRUCTION_DENSITY_THRESHOLD`).
 - **H005**: The heuristic layer MUST NOT block or modify the pipeline — it only produces scores. Verdict decisions are the responsibility of Confidence Fusion.
+- **H006**: A single suspicious signal — and any `suspicious_count` without a multi-domain contradiction — MUST NOT raise static severity. Heuristics alone cap out at MEDIUM; they never escalate a file above it (see [Confidence Fusion](confidence-fusion.md)).
 
 ## Cross-References
 

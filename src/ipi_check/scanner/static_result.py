@@ -1,10 +1,10 @@
 """Static Result — assemble static analysis results and orchestrate layers 1-4."""
 from __future__ import annotations
 
-import re
 import warnings
 from typing import TYPE_CHECKING
 
+from ipi_check.core.invisible import strip_invisible
 from ipi_check.core.types import (
     ByteFinding,
     DiscoveredFile,
@@ -18,38 +18,49 @@ from ipi_check.core.types import (
 )
 from ipi_check.scanner.byte_analysis import analyze_bytes
 from ipi_check.scanner.code_extractor import extract_comments_and_strings
-from ipi_check.scanner.file_discovery import discover_files
+from ipi_check.scanner.file_discovery import (
+    _has_binary_extension,
+    _has_binary_magic,
+    discover_files,
+    is_text_named,
+)
 from ipi_check.scanner.pattern_matching import match_patterns, match_skill_patterns
 from ipi_check.scanner.semantic_heuristics import compute_heuristics
 
 if TYPE_CHECKING:
     from pathlib import Path
 
-# Threshold (suspicious_count) at which heuristic scores escalate to HIGH severity.
-HEURISTIC_HIGH_SEVERITY_THRESHOLD: int = 2
+# Minimum number of *distinct* suspicious heuristic signals required before the
+# heuristics layer may contribute to severity at all. Heuristics corroborate;
+# they do not accuse — they never escalate severity above MEDIUM on their own.
+HEURISTIC_MIN_SUSPICIOUS_TYPES: int = 2
+
+# Findings at these severities are *significant* for a skill's aggregate
+# verdict — they are the behavioural, actionable signals. Everything below
+# (MEDIUM and lower) marks text that merely *resembles* a payload without the
+# behaviour, so it never determines a skill's aggregate severity (FP-14).
+SIGNIFICANT_SEVERITIES: frozenset[Severity] = frozenset(
+    {Severity.HIGH, Severity.CRITICAL}
+)
+
+# Ordering used to sort significant findings, most severe first, so the
+# reported "significance" is deterministic when several findings tie.
+_SEVERITY_RANK: dict[Severity, int] = {
+    Severity.CRITICAL: 4,
+    Severity.HIGH: 3,
+    Severity.MEDIUM: 2,
+    Severity.LOW: 1,
+    Severity.NONE: 0,
+}
 
 # UTF-8 decoding configuration for visible-text extraction.
 _TEXT_DECODE_ENCODING: str = "utf-8"
 _TEXT_DECODE_ERRORS: str = "replace"
 
-# Invisible-character cleanup regex for visible-text extraction. This mirrors
-# the pattern used by the pattern-matching layer but is applied without
-# lowercasing or whitespace collapsing — the heuristics layer needs the
-# original casing and paragraph structure.
-#
-# Ranges removed:
-#   - ANSI escape sequences (CSI/OSC and similar): ESC [ ... <letter>
-#   - Unicode tag block: U+E0000-U+E007F
-#   - Zero-width / line / paragraph separators: U+200B-U+200F, U+2028-U+2029
-#   - Bidi overrides: U+202A-U+202E, U+2066-U+2069
-#   - Variation selectors: U+FE00-U+FE0F
-_INVISIBLE_CHARS_RE: re.Pattern[str] = re.compile(
-    "\x1b\\[[^A-Za-z]*[A-Za-z]"
-    "|[\U000e0000-\U000e007f]"
-    "|[\u200b-\u200f\u2028\u2029]"
-    "|[\u202a-\u202e\u2066-\u2069]"
-    "|[\ufe00-\ufe0f]"
-)
+# Invisible-character cleanup for visible-text extraction is defined once in
+# ``ipi_check.core.invisible`` and reused via ``strip_invisible`` — which strips
+# the concealed characters without lowercasing or whitespace collapsing, so the
+# heuristics layer keeps the original casing and paragraph structure.
 
 
 def _get_visible_text(raw_bytes: bytes) -> str:
@@ -61,7 +72,7 @@ def _get_visible_text(raw_bytes: bytes) -> str:
     and instruction-density measurements remain meaningful.
     """
     decoded = raw_bytes.decode(_TEXT_DECODE_ENCODING, errors=_TEXT_DECODE_ERRORS)
-    return _INVISIBLE_CHARS_RE.sub("", decoded)
+    return strip_invisible(decoded)
 
 
 def _has_severity(
@@ -70,6 +81,60 @@ def _has_severity(
 ) -> bool:
     """Return ``True`` if any finding in ``findings`` has the given severity."""
     return any(f.severity == severity for f in findings)
+
+
+def _heuristics_corroborate(heuristic_scores: HeuristicScores) -> bool:
+    """Return ``True`` when heuristics are strong enough to corroborate a MEDIUM.
+
+    Requires at least :data:`HEURISTIC_MIN_SUSPICIOUS_TYPES` *distinct*
+    suspicious signals, one of which must be a contradiction above threshold.
+    """
+    return (
+        heuristic_scores.suspicious_count >= HEURISTIC_MIN_SUSPICIOUS_TYPES
+        and heuristic_scores.contradiction_suspicious
+    )
+
+
+def _is_binary_asset(file: DiscoveredFile) -> bool:
+    """Return ``True`` when a skill file is a binary asset, not reviewable text.
+
+    Binary assets are recognised the way the discovery layer does — the
+    extension table, plus the container-magic content sniff for files whose
+    *name* carries no text signal (see
+    :func:`ipi_check.scanner.file_discovery.is_text_named`). Text-named files
+    never pass through the sniff, so a prepended ZIP magic cannot strip a
+    bundled script's findings from a skill's aggregate. A stray NUL byte is
+    deliberately not a binary signal — an interpreter executes a script with
+    an embedded NUL, so dropping such a file would let a one-byte edit hide a
+    functional malicious script.  Any finding a binary asset produces is
+    structural noise: its bytes are not prose, so the finding must not
+    influence a skill's aggregate severity (FP-14).
+    """
+    return _has_binary_extension(file.relative_path) or (
+        not is_text_named(file.path.name, file.relative_path)
+        and _has_binary_magic(file.path)
+    )
+
+
+def _significant_severity(
+    byte_findings: list[ByteFinding],
+    pattern_findings: list[PatternFinding],
+) -> Severity:
+    """Return the worst *significant* (:data:`SIGNIFICANT_SEVERITIES`) severity.
+
+    Only HIGH and CRITICAL findings are significant. MEDIUM findings — and
+    heuristic scores — are corroborating noise at the skill level and never
+    determine the aggregate (FP-14).
+    """
+    if _has_severity(byte_findings, Severity.CRITICAL) or _has_severity(
+        pattern_findings, Severity.CRITICAL
+    ):
+        return Severity.CRITICAL
+    if _has_severity(byte_findings, Severity.HIGH) or _has_severity(
+        pattern_findings, Severity.HIGH
+    ):
+        return Severity.HIGH
+    return Severity.NONE
 
 
 def compute_static_severity(
@@ -82,9 +147,14 @@ def compute_static_severity(
     Logic:
         - Any CRITICAL byte or pattern finding → CRITICAL
         - Any HIGH byte or pattern finding → HIGH
-        - heuristic_scores.suspicious_count >= 2 → HIGH
         - Any byte or pattern finding at all → MEDIUM
+        - Heuristics alone (>= :data:`HEURISTIC_MIN_SUSPICIOUS_TYPES` distinct
+          signals AND a contradiction above threshold) → MEDIUM
         - Otherwise → NONE
+
+    Heuristics never escalate severity above MEDIUM on their own: multiple
+    weak signals are corroborating evidence, not a standalone accusation, and
+    a file with byte/pattern findings already lands at MEDIUM.
     """
     if _has_severity(byte_findings, Severity.CRITICAL) or _has_severity(
         pattern_findings, Severity.CRITICAL
@@ -96,10 +166,10 @@ def compute_static_severity(
     ):
         return Severity.HIGH
 
-    if heuristic_scores.suspicious_count >= HEURISTIC_HIGH_SEVERITY_THRESHOLD:
-        return Severity.HIGH
-
     if byte_findings or pattern_findings:
+        return Severity.MEDIUM
+
+    if _heuristics_corroborate(heuristic_scores):
         return Severity.MEDIUM
 
     return Severity.NONE
@@ -139,7 +209,18 @@ def compute_skill_static_result(skill: SkillUnit) -> SkillStaticResult:
 
     For each file in the skill: byte analysis + skill-specific pattern
     matching.  Heuristics are computed once on the SKILL.md body.
-    Severity is aggregated as the worst across all findings.
+
+    The aggregate severity is derived from the skill's *significant* findings
+    only (see :func:`significant_skill_findings`):
+
+    - findings from binary assets are dropped — their bytes are not reviewable
+      prose, so a font/Office/ZIP container must not drag a benign skill to
+      HIGH (FP-14);
+    - heuristic scores never escalate the aggregate — heuristics corroborate,
+      they do not accuse.
+
+    This keeps a skill from being "drowned" in structural noise: only HIGH and
+    CRITICAL behavioural findings determine the aggregate severity.
     """
     all_byte_findings: list[list[ByteFinding]] = []
     all_pattern_findings: list[list[PatternFinding]] = []
@@ -151,11 +232,28 @@ def compute_skill_static_result(skill: SkillUnit) -> SkillStaticResult:
             all_pattern_findings.append([])
             continue
 
+        if _is_binary_asset(file):
+            # Binary asset: not reviewable text, so none of its findings reach
+            # the aggregate (FP-14). Keep the per-file lists aligned with
+            # ``skill.files`` by recording empty entries.
+            all_byte_findings.append([])
+            all_pattern_findings.append([])
+            continue
+
         byte_findings = analyze_bytes(file, raw_bytes)
         all_byte_findings.append(byte_findings)
 
         pattern_findings = match_skill_patterns(file, raw_bytes)
         all_pattern_findings.append(pattern_findings)
+
+        # Tag every finding with the artifact it came from: the fused skill
+        # verdict flattens findings across all bundled files, so the SARIF
+        # reporter needs the source to anchor each finding at its *real* file
+        # and line (T4.3 / IN-3) instead of defaulting them all to SKILL.md.
+        for byte_finding in byte_findings:
+            byte_finding.file = file
+        for pattern_finding in pattern_findings:
+            pattern_finding.file = file
 
     # Compute heuristics on SKILL.md body
     metadata_bytes = skill.body.encode("utf-8")
@@ -165,16 +263,14 @@ def compute_skill_static_result(skill: SkillUnit) -> SkillStaticResult:
         skill.metadata_file, metadata_bytes, visible_text, metadata_byte_findings
     )
 
-    # Aggregate severity across all files
+    # Aggregate the *significant* findings across all files.
     flat_byte: list[ByteFinding] = [
         f for per_file in all_byte_findings for f in per_file
     ]
     flat_pattern: list[PatternFinding] = [
         f for per_file in all_pattern_findings for f in per_file
     ]
-    aggregate_severity = compute_static_severity(
-        flat_byte, flat_pattern, heuristic_scores
-    )
+    aggregate_severity = _significant_severity(flat_byte, flat_pattern)
 
     return SkillStaticResult(
         skill=skill,
@@ -183,6 +279,80 @@ def compute_skill_static_result(skill: SkillUnit) -> SkillStaticResult:
         metadata_heuristic_scores=heuristic_scores,
         aggregate_severity=aggregate_severity,
     )
+
+
+def significant_skill_findings(
+    skill_static: SkillStaticResult,
+) -> list[tuple[DiscoveredFile, ByteFinding | PatternFinding]]:
+    """Return a skill's *significant* findings, most severe first.
+
+    A finding is significant when its severity is in
+    :data:`SIGNIFICANT_SEVERITIES` (HIGH or CRITICAL). These are the findings
+    that can drive the skill's aggregate verdict; MEDIUM findings and
+    heuristic scores are corroborating noise and are excluded. Binary assets
+    never contribute (see :func:`compute_skill_static_result`), so every
+    returned finding comes from a reviewable file.
+
+    The result is deterministic: ties are broken by the order in which
+    findings were collected (pattern findings before byte findings, then by
+    file order).
+    """
+    scored: list[
+        tuple[int, int, DiscoveredFile, ByteFinding | PatternFinding]
+    ] = []
+    order = 0
+    for file, pattern_findings in zip(
+        skill_static.skill.files,
+        skill_static.file_pattern_findings,
+        strict=True,
+    ):
+        for pattern_finding in pattern_findings:
+            if pattern_finding.severity in SIGNIFICANT_SEVERITIES:
+                scored.append(
+                    (
+                        _SEVERITY_RANK[pattern_finding.severity],
+                        order,
+                        file,
+                        pattern_finding,
+                    )
+                )
+                order += 1
+    for file, byte_findings in zip(
+        skill_static.skill.files,
+        skill_static.file_byte_findings,
+        strict=True,
+    ):
+        for byte_finding in byte_findings:
+            if byte_finding.severity in SIGNIFICANT_SEVERITIES:
+                scored.append(
+                    (
+                        _SEVERITY_RANK[byte_finding.severity],
+                        order,
+                        file,
+                        byte_finding,
+                    )
+                )
+                order += 1
+
+    scored.sort(key=lambda item: (-item[0], item[1]))
+    return [(file, finding) for _rank, _order, file, finding in scored]
+
+
+def significant_finding_label(skill_static: SkillStaticResult) -> str:
+    """Describe the single most severe *significant* finding of a skill.
+
+    Returns a short ``<pattern_id> <category> in <path>`` label naming exactly
+    what pushed the skill to HIGH/CRITICAL, or an empty string when the skill
+    has no significant finding. Surfaced in the skill verdict reasoning so the
+    "significance" of a verdict is auditable (FP-14).
+    """
+    significant = significant_skill_findings(skill_static)
+    if not significant:
+        return ""
+    file, finding = significant[0]
+    if isinstance(finding, PatternFinding):
+        return f"{finding.pattern_id} {finding.category.value} in {file.relative_path}"
+    return f"{finding.category.value} bytes in {file.relative_path}"
 
 
 def run_static_pipeline(

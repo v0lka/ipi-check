@@ -177,7 +177,7 @@ SanitizedContent ──▶ LLMResult    Skill LLMResult
 - **I002**: If `StaticResult.severity == CRITICAL` or `SkillStaticResult.aggregate_severity == CRITICAL`, the LLM classifier MUST NOT be invoked for that file or skill.
 - **I003**: If no LLM arguments are provided, only Case 1 (static analysis) runs; the pipeline MUST skip stages 5–7 and output `FinalVerdict` / `SkillFinalVerdict` based on static analysis alone.
 - **I004**: The SARIF output MUST conform to SARIF v2.1.0 specification and include `artifactLocation`, `region` (line/column), `level` (error/warning/note), and `message` with `text` and `markdown` fields.
-- **I005**: The LLM classifier system prompt (both `CLASSIFIER_SYSTEM_PROMPT` and `SKILL_CLASSIFIER_SYSTEM_PROMPT`) MUST be immutable — they are security boundaries. Any change to them requires a spec update and security review.
+- **I005**: The LLM classifier system prompts (`CLASSIFIER_SYSTEM_PROMPT`, `BATCH_CLASSIFIER_SYSTEM_PROMPT`, and `SKILL_CLASSIFIER_SYSTEM_PROMPT`) MUST be immutable — they are security boundaries. Any change to them requires a spec update and security review.
 - **I006**: All numeric thresholds (entropy, invisible ratio, instruction density) MUST be defined as named module-level constants, never as magic numbers inline.
 - **I007**: The scanner MUST NOT modify any scanned files — it is strictly read-only.
 - **I008**: Skill discovery is automatic — when `SKILL.md` is found, the containing directory is treated as a skill unit. The scanner MUST NOT require additional CLI flags to enable skill scanning.

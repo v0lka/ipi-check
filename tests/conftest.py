@@ -101,7 +101,13 @@ def sample_discovered_file(tmp_path: Path) -> DiscoveredFile:
 @pytest.fixture(autouse=True)
 def _isolate_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """Isolate tests from inherited LLM-related environment variables."""
-    for var in ("LITELLM_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"):
+    for var in (
+        "LITELLM_API_KEY",
+        "OPENAI_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "IPI_CHECK_LLM_CACHE_DIR",
+        "IPI_CHECK_LLM_MODEL",
+    ):
         monkeypatch.delenv(var, raising=False)
 
 

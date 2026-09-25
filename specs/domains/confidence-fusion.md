@@ -59,10 +59,12 @@ StaticResult + LLMResult?
 │      → CRITICAL               │
 │    - Any HIGH byte/pat?       │
 │      → HIGH                   │
-│    - heuristic_suspicious_count│
-│      ≥ 2 → HIGH               │
-│    - Any MEDIUM findings?     │
-│      → MEDIUM                  │
+│    - Any byte/pattern finding?│
+│      → MEDIUM                 │
+│    - Heuristics alone (≥2     │
+│      distinct signals + a     │
+│      contradiction)?          │
+│      → MEDIUM (never higher)  │
 │    - Otherwise → NONE          │
 └───────────────┬───────────────┘
                 │
@@ -84,10 +86,11 @@ if any byte_finding.severity == "CRITICAL" or any pattern_finding.severity == "C
     severity = CRITICAL
 elif any byte_finding.severity == "HIGH" or any pattern_finding.severity == "HIGH":
     severity = HIGH
-elif heuristic_scores.suspicious_count >= 2:
-    severity = HIGH
 elif any byte_finding or any pattern_finding:
     severity = MEDIUM
+elif (heuristic_scores.suspicious_count >= 2
+      and heuristic_scores.contradiction_suspicious):
+    severity = MEDIUM  # heuristics corroborate but never escalate above MEDIUM
 else:
     severity = NONE
 ```
@@ -118,18 +121,23 @@ else:
 
 - Input is a `SkillStaticResult` (aggregated across all files in the skill) instead of per-file findings
 - All findings across all files in the skill are flattened into a single findings list
+- The aggregate severity is driven by *significant* findings only (HIGH/CRITICAL, excluding binary assets and heuristics); see `compute_skill_static_result()`
 - CRITICAL static severity on any file in the skill triggers immediate BLOCK (LLM skipped)
 - The decision matrix is identical — same severity × LLM verdict × confidence rules apply
+- **Significance**: the single worst significant finding (`"<rule> <category> in <path>"`) is surfaced in the skill verdict's `reasoning`, so which finding drove a HIGH/CRITICAL is auditable
 
 ### Reasoning Generation
 
 For each decision, a human-readable reasoning string is constructed:
 
 - **BLOCK (CRITICAL static)**: "CRITICAL static finding: {category} — LLM classification skipped"
-- **BLOCK (CRITICAL static in skill)**: "CRITICAL static finding in skill '{name}' — LLM classification skipped"
+- **BLOCK (CRITICAL static in skill)**: "CRITICAL static finding ({significance}) in skill '{name}' — LLM classification skipped"
 - **BLOCK (static+LLM agree)**: "Static severity {severity} + LLM '{verdict}' (confidence: {confidence:.0%}) — consensus"
 - **REVIEW_REQUIRED**: "Static severity {severity} but LLM '{verdict}' — manual review recommended"
 - **PASS**: "No significant findings"
+
+For skills, `{severity}` is rendered as `"<severity> (<significance>)"` whenever a significant finding
+drove the severity (see Skill Verdict Fusion); without one, the plain severity value is used.
 
 ## Edge Cases
 
@@ -139,9 +147,11 @@ For each decision, a human-readable reasoning string is constructed:
 | LLM was not invoked (Case 1 only) | Use static-only fallback: MEDIUM → REVIEW_REQUIRED, NONE → PASS |
 | LLM was invoked but `compromised=True` | Fall back to static-only logic, flag `llm_compromised=True` |
 | Multiple findings of different severities | Static severity is the maximum of all findings |
-| Heuristic scores suspicious but no byte/pattern findings | `suspicious_count >= 2` raises severity to HIGH, influencing the decision |
+| Heuristic scores suspicious but no byte/pattern findings | Severity stays NONE unless ≥2 distinct signals *and* a multi-domain contradiction are present, in which case it rises only to MEDIUM (never HIGH) |
 | Skill with CRITICAL static finding on any file | Entire skill verdict is BLOCK; LLM skipped for the skill |
 | Skill with no CRITICAL finding but HIGH on a bundled script | Skill aggregate severity is HIGH; LLM is consulted, fusion matrix applies |
+| Skill whose only HIGH/Critical-level findings come from a bundled binary asset | Findings are excluded from the aggregate; the skill's severity is not raised, so a `safe` LLM yields PASS (FP-14) |
+| Skill with only MEDIUM findings | MEDIUM is not significant: aggregate severity stays NONE; a `safe` LLM yields PASS |
 
 ## Dependencies
 
@@ -160,6 +170,9 @@ For each decision, a human-readable reasoning string is constructed:
 - **F004**: An LLM `malicious` verdict with confidence < 0.85 MUST NOT produce `BLOCK` on its own — it requires static corroboration (MEDIUM or higher).
 - **F005**: An LLM `safe` verdict MUST NOT override HIGH static severity — the result is `REVIEW_REQUIRED`, not `PASS`.
 - **F006**: `fuse_skill_verdict()` MUST use the same decision matrix as `fuse_verdicts()` — skill verdicts follow identical severity × LLM verdict × confidence rules.
+- **F007**: Heuristic scores MUST NOT escalate static severity above MEDIUM on their own. A MEDIUM severity may be produced from heuristics only when at least two distinct suspicious signals are present *and* the contradiction flag is set.
+- **F008**: A skill's aggregate severity MUST be derived from *significant* findings only — byte/pattern findings at HIGH or CRITICAL severity from reviewable (non-binary-asset) files. Findings from binary assets and heuristic scores MUST NOT determine the aggregate.
+- **F009**: A finding capped by example-region framing in an agent-instruction file (`PatternFinding.framed`) MUST floor the file's fused decision at `REVIEW_REQUIRED` — never `PASS`. The framing in an agent-instruction file is attacker-writable prose indistinguishable from a genuine quotation, so the cap is a precision compromise, not a trust decision; only the verdict floor keeps it from becoming a silence mechanism.
 
 ## Cross-References
 

@@ -19,12 +19,17 @@ from ipi_check.scanner.static_result import (
 )
 
 
-def _zero_scores(suspicious_count: int = 0) -> HeuristicScores:
+def _zero_scores(
+    suspicious_count: int = 0,
+    *,
+    contradiction_suspicious: bool = False,
+) -> HeuristicScores:
     return HeuristicScores(
         entropy=0.0, entropy_suspicious=False,
         invisible_ratio=0.0, invisible_suspicious=False,
         instruction_density=0.0, instruction_density_suspicious=False,
-        contradiction_score=0.0, contradiction_suspicious=False,
+        contradiction_score=0.5 if contradiction_suspicious else 0.0,
+        contradiction_suspicious=contradiction_suspicious,
         suspicious_count=suspicious_count,
     )
 
@@ -65,9 +70,35 @@ class TestComputeStaticSeverity:
         sev = compute_static_severity([], [_pattern(Severity.HIGH)], _zero_scores())
         assert sev == Severity.HIGH
 
-    def test_high_via_heuristic_count(self) -> None:
-        sev = compute_static_severity([], [], _zero_scores(suspicious_count=2))
-        assert sev == Severity.HIGH
+    def test_heuristics_alone_corroborate_medium_not_high(self) -> None:
+        """Distinct signals incl. contradiction → MEDIUM, never HIGH (FP-12)."""
+        sev = compute_static_severity(
+            [], [], _zero_scores(suspicious_count=3, contradiction_suspicious=True)
+        )
+        assert sev == Severity.MEDIUM
+
+    def test_heuristics_without_contradiction_none(self) -> None:
+        """Multiple distinct signals without a contradiction → NONE (FP-12)."""
+        sev = compute_static_severity(
+            [], [], _zero_scores(suspicious_count=3, contradiction_suspicious=False)
+        )
+        assert sev == Severity.NONE
+
+    def test_single_heuristic_signal_none(self) -> None:
+        """A lone heuristic signal is not enough to corroborate anything."""
+        sev = compute_static_severity(
+            [], [], _zero_scores(suspicious_count=1, contradiction_suspicious=True)
+        )
+        assert sev == Severity.NONE
+
+    def test_medium_finding_not_escalated_by_heuristics(self) -> None:
+        """Heuristics never push an existing finding above MEDIUM."""
+        sev = compute_static_severity(
+            [_byte(Severity.MEDIUM)],
+            [],
+            _zero_scores(suspicious_count=4, contradiction_suspicious=True),
+        )
+        assert sev == Severity.MEDIUM
 
     def test_medium_only(self) -> None:
         sev = compute_static_severity(

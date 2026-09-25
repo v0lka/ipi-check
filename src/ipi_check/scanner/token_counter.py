@@ -21,6 +21,14 @@ FALLBACK_CHARS_PER_TOKEN: int = 4
 #: Targets ~1/3 of a typical 100K context window.
 TARGET_BATCH_TOKENS: int = 30_000
 
+#: Token budget for a single skill-classification payload. A skill whose
+#: serialized payload exceeds this budget is split into several chunked
+#: payloads, each classified independently and merged (worst verdict wins) —
+#: the skill-audit analogue of :data:`TARGET_BATCH_TOKENS` for source-code
+#: batches. Kept equal to the batch target so every LLM input stays within a
+#: comfortably small fraction of the provider context window.
+TARGET_SKILL_PAYLOAD_TOKENS: int = TARGET_BATCH_TOKENS
+
 
 def count_tokens(text: str) -> int:
     """Count the number of tokens in ``text``.

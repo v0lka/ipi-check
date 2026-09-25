@@ -20,7 +20,16 @@ INVISIBLE_RATIO_THRESHOLD: float = 0.1
 INSTRUCTION_DENSITY_THRESHOLD: float = 3.0
 MIN_PARAGRAPH_SIZE: int = 50
 
-CONTRADICTION_SCORE_THRESHOLD: float = 0.0
+# Fraction of populated domains that must exhibit polarity conflicts before the
+# contradiction heuristic fires. A single-domain polarity flip (e.g. "must
+# apply" vs. "not applicable") is normal in technical prose, so the threshold
+# is well above zero.
+CONTRADICTION_SCORE_THRESHOLD: float = 0.5
+
+# Minimum number of *distinct* conflicting domains required for the
+# contradiction heuristic. A contradiction confined to a single domain is
+# common in legitimate documentation and is not treated as an injection signal.
+MIN_CONFLICTING_DOMAINS: int = 2
 
 IMPERATIVE_VERBS: frozenset[str] = frozenset(
     {
@@ -369,7 +378,10 @@ def _compute_contradiction_score(visible_text: str) -> float:
     ``rules`` domain).
 
     Returns a score in [0.0, 1.0]: the fraction of populated domains
-    that exhibit polarity conflicts.
+    that exhibit polarity conflicts. A contradiction confined to fewer
+    than :data:`MIN_CONFLICTING_DOMAINS` domains returns 0.0 — a single
+    domain flipping polarity (e.g. "must apply" vs. "not applicable") is
+    routine in technical prose and is not treated as an injection signal.
     """
     if not visible_text or len(visible_text) < 100:
         return 0.0
@@ -396,6 +408,9 @@ def _compute_contradiction_score(visible_text: str) -> float:
         for polarities in domain_polarities.values()
         if len(polarities) > 1 or "DISPENSATION" in polarities
     )
+
+    if conflicting < MIN_CONFLICTING_DOMAINS:
+        return 0.0
 
     return conflicting / len(domain_polarities)
 

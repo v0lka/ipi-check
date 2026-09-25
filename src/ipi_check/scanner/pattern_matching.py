@@ -5,6 +5,7 @@ import re
 
 import regex
 
+from ipi_check.core.invisible import strip_invisible
 from ipi_check.core.types import (
     DiscoveredFile,
     FileCategory,
@@ -311,6 +312,191 @@ INJECTION_PATTERNS: list[tuple[str, str, PatternFindingCategory, Severity]] = [
 
 # Skill-specific patterns for IPI401–411.
 # These detect *malicious behaviour* in agent skills, not just instruction presence.
+
+# Sensitive credential environment-variable names, defined once and reused by
+# every IPI402 sub-pattern so the list cannot drift out of sync.
+_CREDENTIAL_ENV_VARS: str = (
+    r"AWS_ACCESS_KEY_ID|AWS_SECRET_ACCESS_KEY|GITHUB_TOKEN|GH_TOKEN"
+    r"|NPM_TOKEN|DOCKER_TOKEN|OPENAI_API_KEY|ANTHROPIC_API_KEY"
+    r"|GEMINI_API_KEY|COHERE_API_KEY|HUGGINGFACE_TOKEN"
+    r"|JWT_SECRET|SSH_PRIVATE_KEY|PRIVATE_KEY|AZURE_OPENAI_KEY"
+)
+
+# Environment accessors that *read* a value (Python: os.environ/os.getenv,
+# Node: process.env, C/shell: getenv).
+_ENV_ACCESSORS: str = r"(?:os\.environ|os\.getenv|process\.env|getenv)"
+
+# Outbound-transmission sinks, used to detect a credential read that sits right
+# next to exfiltration ("reads a secret on its way out").
+_CREDENTIAL_EXFIL_SINKS: str = (
+    r"(?:curl|wget|(?:requests|urllib)\.(?:post|get|put|patch|request)|https?://)"
+)
+
+# IPI402 sub-patterns — credential *harvesting* means the secret value is
+# actually read (accessed in code or expanded in shell) or read next to an
+# outbound transmission. A bare mention of the variable name is NOT harvesting
+# (FP-8: presence ≠ theft), and a read of a *non-credential* variable next to
+# a URL is ordinary code (FP-9).
+_IPI402_CODE_READ: str = (
+    _ENV_ACCESSORS
+    + r"\s*(?:\.\s*get\s*)?[\[\(\.]\s*['\"]?(?:"
+    + _CREDENTIAL_ENV_VARS
+    + r")\b"
+)
+_IPI402_SHELL_READ: str = r"\$\{?(?:" + _CREDENTIAL_ENV_VARS + r")\b\}?"
+#: A *credential* read (either form), used as the anchor of the corroborated
+#: read+transmit patterns so that ``os.getenv("BASE_URL", "https://…")`` —
+#: an accessor of a non-credential variable that merely contains a URL — is
+#: not mistaken for harvesting.
+_IPI402_CREDENTIAL_READ: str = r"(?:" + _IPI402_CODE_READ + r"|" + _IPI402_SHELL_READ + r")"
+_IPI402_READ_THEN_SINK: str = (
+    _IPI402_CREDENTIAL_READ + r"[^\n]{0,160}?" + _CREDENTIAL_EXFIL_SINKS
+)
+_IPI402_SINK_THEN_READ: str = (
+    _CREDENTIAL_EXFIL_SINKS + r"[^\n]{0,160}?" + _IPI402_CREDENTIAL_READ
+)
+
+# ---------------------------------------------------------------------------
+# Context-sensitive severity model (T1.2 — FP-5 / FP-6 / FP-9 / FP-10)
+# ---------------------------------------------------------------------------
+#
+# A bare ``curl https://…`` or a bare ``sudo`` is not proof of malice: a
+# legitimate deployment skill downloads release assets and reads secrets, and a
+# build script routinely runs ``rm -rf dist``.  Severity therefore depends on
+# *context*, not on the mere presence of a token:
+#
+# * external transmission (IPI403) is baseline MEDIUM; it rises to CRITICAL only
+#   when the destination is a known exfiltration host (``evil``, ``webhook``,
+#   ``interact.sh``, …) or when the same file also reads a credential (IPI402);
+#   a destination on the trusted-domain allowlist is LOW (informational).
+# * credential harvesting (IPI402) is HIGH when the secret is merely *read* and
+#   CRITICAL when it is read *and* transmitted (corroboration).
+# * privilege escalation (IPI410) is HIGH for a bare privileged invocation and
+#   CRITICAL only for an inherently destructive escalation (``chmod 7xx``,
+#   ``chown root``, ``pkexec``, or ``sudo`` driving ``rm -rf``/``dd``/``mkfs``).
+# * a destructive command (``DEST_002`` / ``rm -rf``) in a build manifest is
+#   MEDIUM unless it targets a dangerous root/home/system path.
+
+#: Hosts a legitimate skill may contact: package registries, source hosting,
+#: common deployment / LLM APIs, OS package mirrors, and loopback.  A
+#: transmission to one of these is informational (``LOW``), not an accusation.
+#: Configurable — extend this frozenset to add project-specific trusted hosts.
+TRUSTED_DOMAINS: frozenset[str] = frozenset(
+    {
+        # Package registries
+        "registry.npmjs.org",
+        "registry.yarnpkg.com",
+        "pypi.org",
+        "files.pythonhosted.org",
+        "rubygems.org",
+        "crates.io",
+        "static.crates.io",
+        "repo.maven.apache.org",
+        "plugins.gradle.org",
+        "api.nuget.org",
+        # Source hosting / release assets. Read/download-oriented hosts only:
+        # write-capable API endpoints (``api.github.com`` — gists, issues,
+        # …) are deliberately absent, because posting secrets to them is
+        # exfiltration (an attacker-controlled gist is a write target, not a
+        # package mirror).
+        "github.com",
+        "codeload.github.com",
+        "objects.githubusercontent.com",
+        "raw.githubusercontent.com",
+        "gitlab.com",
+        "bitbucket.org",
+        # Common deployment / cloud APIs
+        "api.vercel.com",
+        "vercel.com",
+        "api.netlify.com",
+        "api.cloudflare.com",
+        "storage.googleapis.com",
+        "s3.amazonaws.com",
+        # LLM provider APIs (a legitimate skill may call these)
+        "api.openai.com",
+        "api.anthropic.com",
+        "generativelanguage.googleapis.com",
+        # OS package mirrors
+        "deb.debian.org",
+        "archive.ubuntu.com",
+        "security.ubuntu.com",
+        # Loopback
+        "localhost",
+        "127.0.0.1",
+    }
+)
+
+#: Host fragments that mark an outbound destination as a likely exfiltration
+#: sink.  A transmission to such a host is CRITICAL regardless of the allowlist.
+#: The single-word fragments are label-anchored (``\b…\b`` / ``\boast\.``) so
+#: ordinary domains that merely *contain* the fragment (``roast.io``,
+#: ``coast.org``, ``stealth.io``, ``toastify.app``, ``photo-transfer.shop``)
+#: are not misclassified as exfiltration sinks.
+_EXFIL_DOMAIN_RE: re.Pattern[str] = re.compile(
+    r"(?:"
+    r"attacker|exfil|malicious|backdoor|\bbeacon\b|\bc2\b"
+    r"|webhook|burpcollaborator|\bburp\b|collaborator"
+    r"|canarytoken|requestbin|pipedream|pastebin|ngrok"
+    r"|\bevil\b|\bsteal\b"
+    r"|\boastify\b|\boast\."
+    r"|\binteract\.sh\b|\btransfer\.sh\b"
+    r")",
+    re.IGNORECASE,
+)
+
+#: Extract the host component from every URL in a text (user info and port
+#: stripped, lower-cased).
+_URL_HOST_RE: re.Pattern[str] = re.compile(
+    r"https?://([^/\s'\"<>()]+)", re.IGNORECASE
+)
+
+#: Baseline severity for an external transmission to an unclassified host.
+EXTERNAL_TRANSMISSION_BASELINE: Severity = Severity.MEDIUM
+#: Severity for an external transmission to an allowlisted host.
+EXTERNAL_TRANSMISSION_TRUSTED: Severity = Severity.LOW
+
+#: Manifest files where cleanup of *relative* build output is routine.
+BUILD_CONFIG_FILENAMES: frozenset[str] = frozenset({"package.json"})
+#: Severity applied to ``DEST_002`` (``rm -rf``) inside a build manifest.
+DEST_002_BUILD_CONTEXT_SEVERITY: Severity = Severity.MEDIUM
+#: A destructive target that is *never* routine: the filesystem root, a root
+#: wildcard (``/*``, ``*``, ``./*``), the home directory, a system directory,
+#: or a parent directory. Each alternative is anchored to a token boundary so
+#: a benign relative path (`dist/`, `build`) is not mistaken for one.
+_DANGEROUS_DEST_TARGET_RE: re.Pattern[str] = re.compile(
+    r"(?:^|[\s\"'=(,])"
+    r"(?:"
+    r"/(?![A-Za-z0-9._-])"  # filesystem root "/" or "/*"
+    r"|\.?/?\*+(?![\w./-])"  # a wildcard target: "*", "./*", "**"
+    r"|~(?![A-Za-z0-9._-])|~\w"  # home directory "~", "~/", "~user"
+    r"|\$HOME\b|\$\{HOME\}"
+    r"|/(?:etc|usr|var|bin|sbin|lib|boot|opt|root|home|srv|mnt|media|Users)"
+    r"(?![A-Za-z0-9_-])"  # a system directory
+    r"|\.\.(?![A-Za-z0-9._-])"  # parent directory ".."
+    r")",
+    re.IGNORECASE,
+)
+
+#: Patterns whose match is skipped when the text immediately before it is a
+#: *prohibition* — advice against a privileged action is not privilege
+#: escalation (FP-10: "не запускай sudo" / "do not use sudo"). English and
+#: Russian negations (the FP-10 report cites a Russian-language repo).
+_NEGATION_GUARDED_PATTERN_IDS: frozenset[str] = frozenset({"IPI410"})
+_NEGATED_PRIVILEGE_RE: re.Pattern[str] = re.compile(
+    r"(?:\b(?:not|never|no|avoid|without)\b|\bdon['’]t\b|\bcannot\b|\bcan['’]t\b)"
+    r"\s+(?:use|run|invoke|execute|call|require|need|start|launch)?\s*$"
+    r"|\b(?:не|никогда|нельзя|избегай)\b"
+    r"\s+(?:запускай|запускать|используй|использовать|выполняй|выполнять"
+    r"|вызывай|вызывать)?\s*$"
+)
+
+#: The destructive payload that turns a bare `sudo` into a CRITICAL escalation.
+#: Shared by the CRITICAL IPI410 pattern and the negative look-ahead on the
+#: bare-`sudo` HIGH pattern, so the two never both fire on the same span.
+_PRIV_DESTRUCTIVE_PAYLOAD: str = (
+    r"(?:rm\s+-[a-z]*[rf]|dd\s+if=|mkfs|shred\b|>\s*/dev/sd)"
+)
+
 SKILL_PATTERNS: list[tuple[str, str, PatternFindingCategory, Severity]] = [
     # IPI401 — Remote code execution: curl/wget piped to interpreter
     (
@@ -326,43 +512,65 @@ SKILL_PATTERNS: list[tuple[str, str, PatternFindingCategory, Severity]] = [
         PatternFindingCategory.REMOTE_EXECUTION,
         Severity.CRITICAL,
     ),
-    # IPI402 — Credential harvesting: references to sensitive env vars
+    # IPI402 — Credential harvesting: a sensitive secret is actually *read*
+    # (accessed in code or expanded in shell). A bare mention of the variable
+    # name is not harvesting (FP-8).
     (
         "IPI402",
-        r"\b(?:AWS_ACCESS_KEY_ID|AWS_SECRET_ACCESS_KEY|GITHUB_TOKEN|GH_TOKEN"
-        r"|NPM_TOKEN|DOCKER_TOKEN|OPENAI_API_KEY|ANTHROPIC_API_KEY"
-        r"|GEMINI_API_KEY|COHERE_API_KEY|HUGGINGFACE_TOKEN"
-        r"|JWT_SECRET|SSH_PRIVATE_KEY|PRIVATE_KEY|AZURE_OPENAI_KEY)\b",
+        _IPI402_CODE_READ,
         PatternFindingCategory.CREDENTIAL_HARVESTING,
         Severity.HIGH,
     ),
     (
         "IPI402",
-        r"\$\{?(?:AWS_ACCESS_KEY_ID|AWS_SECRET|GITHUB_TOKEN|GH_TOKEN"
-        r"|OPENAI_API_KEY|ANTHROPIC_API_KEY)\}?\b",
+        _IPI402_SHELL_READ,
         PatternFindingCategory.CREDENTIAL_HARVESTING,
         Severity.HIGH,
     ),
-    # IPI403 — External data transmission: curl/wget/requests to URLs
+    # IPI402 — Credential harvesting combined with transmission: a *credential*
+    # read co-located with an outbound sink (either order) on the same line.
+    # This is the *corroborated* form — the secret is read **and** sent — so it
+    # is CRITICAL, whereas merely reading a secret is HIGH (T1.2 corroboration).
+    # A transmission whose every destination host is allowlisted is refined
+    # back to HIGH in ``match_skill_patterns`` (FP-9).
+    (
+        "IPI402",
+        _IPI402_READ_THEN_SINK,
+        PatternFindingCategory.CREDENTIAL_HARVESTING,
+        Severity.CRITICAL,
+    ),
+    (
+        "IPI402",
+        _IPI402_SINK_THEN_READ,
+        PatternFindingCategory.CREDENTIAL_HARVESTING,
+        Severity.CRITICAL,
+    ),
+    # IPI403 — External data transmission: curl/wget/requests to URLs.
+    # Baseline MEDIUM: a skill may legitimately download an asset or call an
+    # API. Severity is refined per match in ``match_skill_patterns`` — LOW for
+    # an allowlisted host, CRITICAL for a known exfil host or when the file also
+    # reads a credential (corroboration, FP-9).
     (
         "IPI403",
         r"(?:curl|wget|fetch)\s+.*https?://",
         PatternFindingCategory.EXTERNAL_TRANSMISSION,
-        Severity.CRITICAL,
+        EXTERNAL_TRANSMISSION_BASELINE,
     ),
     (
         "IPI403",
         r"(?:requests|http|urllib)\.(?:post|get|put|delete|request)"
         r"\s*\(.{0,80}https?://",
         PatternFindingCategory.EXTERNAL_TRANSMISSION,
-        Severity.CRITICAL,
+        EXTERNAL_TRANSMISSION_BASELINE,
     ),
-    # IPI404 — Dynamic context abuse: !`command` pattern
+    # IPI404 — Dynamic context abuse: !`command` syntax. This is also a
+    # legitimate skill feature, so it is reported as informational (LOW) rather
+    # than HIGH by default (FP-7).
     (
         "IPI404",
         r"!`[^`]+`",
         PatternFindingCategory.DYNAMIC_CONTEXT,
-        Severity.HIGH,
+        Severity.LOW,
     ),
     # IPI405 — Excessive permissions: wildcard in allowed-tools
     (
@@ -395,28 +603,49 @@ SKILL_PATTERNS: list[tuple[str, str, PatternFindingCategory, Severity]] = [
         PatternFindingCategory.COMMAND_INJECTION_SKILL,
         Severity.CRITICAL,
     ),
-    # IPI409 — Secrecy/coercion: "do NOT tell the user"
+    # IPI409 — Secrecy/coercion: instructions to hide behaviour from the user.
+    # An explicit concealment phrase is required; a bare authority word such as
+    # "MANDATORY" (or a bare adverb like "silently") is NOT secrecy (FP-6).
     (
         "IPI409",
         r"(?:do\s+not\s+(?:tell|reveal|mention|inform|share|disclose|notify"
-        r"|let\s+\w+\s+know)\s+(?:the\s+)?(?:user|anyone|anybody|them))",
+        r"|alert|warn)\s+[^\n]{0,40}?(?:the\s+)?(?:user|anyone|anybody|them)\b"
+        r"|(?:do\s+not|don['’]t)\s+let\s+(?:the\s+)?(?:user|anyone|anybody|them)"
+        r"\s+know)",
         PatternFindingCategory.SKILL_SECRECY,
         Severity.CRITICAL,
     ),
     (
         "IPI409",
-        r"\b(?:MANDATORY|silently|without\s+telling|without\s+informing"
-        r"|covertly|secretly|furtively|under\s+no\s+circumstances"
-        r"|must\s+not\s+disclose)\b",
+        r"(?:without\s+(?:telling|informing|notifying|alerting|advising|warning)\b"
+        r"|(?:do\s+not|don['’]t)\s+(?:disclose|reveal|divulge)\b"
+        r"|\bmust\s+not\s+(?:disclose|reveal|divulge)\b"
+        r"|\b(?:covertly|secretly|furtively|clandestinely)\b)",
         PatternFindingCategory.SKILL_SECRECY,
         Severity.HIGH,
     ),
-    # IPI410 — Privilege escalation: sudo, chmod 7xx, chown root
+    # IPI410 — Privilege escalation: an escalating primitive that is inherently
+    # destructive → CRITICAL (chmod 7xx, chown root, pkexec, or `sudo` driving a
+    # destructive command such as `rm -rf`). A *bare* privileged invocation is
+    # HIGH, not CRITICAL (FP-10).
     (
         "IPI410",
-        r"(?:sudo\b|chmod\s+.*[0-7]*7[0-7]*[0-7]*|chown\s+root|pkexec\b)",
+        r"(?:chmod\s+.*[0-7]*7[0-7]*[0-7]*|chown\s+root|pkexec\b"
+        r"|sudo\b[^\n]{0,40}?" + _PRIV_DESTRUCTIVE_PAYLOAD + r")",
         PatternFindingCategory.PRIVILEGE_ESCALATION,
         Severity.CRITICAL,
+    ),
+    # IPI410 — Bare privileged invocation (`sudo`): a privilege-escalation
+    # *attempt*, but not proof of malice on its own → HIGH. A prohibition
+    # ("do not use sudo") is suppressed by the negation guard, and a destructive
+    # sudo (`sudo rm -rf`, `sudo;rm -rf`) is already CRITICAL above — the
+    # negative look-ahead exactly complements the CRITICAL pattern's separator
+    # (`[^\n]`), so the two never both fire on the same span (FP-10).
+    (
+        "IPI410",
+        r"\bsudo\b(?![^\n]{0,40}?" + _PRIV_DESTRUCTIVE_PAYLOAD + r")",
+        PatternFindingCategory.PRIVILEGE_ESCALATION,
+        Severity.HIGH,
     ),
     # IPI411 — Filesystem enumeration
     (
@@ -478,13 +707,15 @@ _SKILL_CATEGORY_DESCRIPTIONS: dict[PatternFindingCategory, str] = {
         "Remote execution pattern detected: downloads and executes remote code"
     ),
     PatternFindingCategory.CREDENTIAL_HARVESTING: (
-        "Credential harvesting detected: references to sensitive environment variables"
+        "Credential harvesting detected: a sensitive environment credential is "
+        "read or transmitted"
     ),
     PatternFindingCategory.EXTERNAL_TRANSMISSION: (
         "External data transmission detected: sends data to remote URLs"
     ),
     PatternFindingCategory.DYNAMIC_CONTEXT: (
-        "Dynamic context abuse detected: uses !`command` to inject runtime context"
+        "Dynamic context usage detected: uses !`command` to inject runtime context "
+        "(informational — a legitimate skill feature)"
     ),
     PatternFindingCategory.EXCESSIVE_PERMISSIONS: (
         "Excessive permissions detected: wildcard tool access in allowed-tools"
@@ -518,28 +749,34 @@ _SEVERITY_ORDER: dict[Severity, int] = {
     Severity.CRITICAL: 4,
 }
 
-# Invisible character cleanup regex.
-# - ANSI escape sequences (CSI/OSC and similar): ESC [ ... <letter>
-# - Unicode tag block: U+E0000-U+E007F
-# - Zero-width and line/paragraph separators: U+200B-U+200F, U+2028, U+2029
-# - Bidi overrides: U+202A-U+202E, U+2066-U+2069
-# - Variation selectors: U+FE00-U+FE0F
-_INVISIBLE_CHARS_RE: re.Pattern[str] = re.compile(
-    "\x1b\\[[^A-Za-z]*[A-Za-z]"
-    "|[\U000e0000-\U000e007f]"
-    "|[\u200b-\u200f\u2028\u2029]"
-    "|[\u202a-\u202e\u2066-\u2069]"
-    "|[\ufe00-\ufe0f]"
-)
+# Invisible-character cleanup (ANSI escapes + Unicode tags / zero-width /
+# separators / bidi controls / variation selectors) is defined exactly once in
+# ``ipi_check.core.invisible`` and reused here via ``strip_invisible``.
 
 # Collapse runs of horizontal whitespace (anything in \s except '\n')
 # to a single space. Newlines are preserved so callers can split by lines.
 _HORIZONTAL_WS_RE: re.Pattern[str] = re.compile(r"[^\S\n]+")
 
+#: Private Use Area codepoints (``U+E000``–``U+F8FF``), stripped during
+#: normalization (see :func:`normalize_str`): a single PUA character spliced
+#: into a keyword would otherwise defeat every injection regex, while the
+#: byte layer still reports the PUA usage independently.
+_PUA_RE: re.Pattern[str] = re.compile(r"[\ue000-\uf8ff]")
+
 # Regex to extract original line numbers from the ``[L{line}]`` prefix that
 # ``extract_comments_and_strings`` attaches to each extracted fragment.
-# Matches at the start of a line: ``[L42] rest of line...``.
-_EXTRACTED_LINE_RE: re.Pattern[str] = re.compile(r"^\[L(\d+)\]\s")
+# Matches at the start of a line: ``[L42] rest of line...`` — with exactly
+# ONE space after the label (and after the tag), because the extractor emits
+# exactly one space; a content line whose own text begins with a tag-like
+# token is emitted with an extra leading space (see the extractor), so the
+# grammar below can never mistake attacker text for provenance.
+# Fragments that originated from a source-code *string literal* — a docstring
+# (``[DOC]``) or any other string value (``[STR]``) — additionally carry a tag
+# (``[L42] [DOC] rest of line...`` / ``[L42] [STR] rest of line...``), which
+# marks them as an *example region* — see :func:`_detect_example_regions`.
+_EXTRACTED_LINE_RE: re.Pattern[str] = re.compile(
+    r"^\[L(\d+)\] (?:(?P<example>\[DOC\]|\[STR\]) )?"
+)
 
 
 def normalize_str(text: str) -> str:
@@ -547,7 +784,12 @@ def normalize_str(text: str) -> str:
 
     Steps:
         1. Strip invisible characters (zero-width, Unicode tags, ANSI
-           escapes, bidi overrides, variation selectors).
+           escapes, bidi overrides, variation selectors) **and Private Use
+           Area codepoints** (``U+E000``–``U+F8FF``). PUA characters have no
+           legitimate meaning inside prose or code identifiers, and a single
+           one spliced into a keyword (``ign\\ue000ore``) would otherwise
+           defeat every injection regex — the byte layer still reports the
+           PUA usage independently (IPI004), so nothing is lost.
         2. Lowercase.
         3. Collapse runs of horizontal whitespace to a single space
            (newlines are preserved to allow line-based matching).
@@ -557,7 +799,7 @@ def normalize_str(text: str) -> str:
     :func:`~ipi_check.scanner.code_extractor.extract_comments_and_strings`)
     without redundant decode.
     """
-    stripped = _INVISIBLE_CHARS_RE.sub("", text)
+    stripped = _PUA_RE.sub("", strip_invisible(text))
     lowered = stripped.lower()
     collapsed = _HORIZONTAL_WS_RE.sub(" ", lowered)
     return collapsed
@@ -569,7 +811,7 @@ def normalize_text(raw_bytes: bytes) -> str:
     Steps:
         1. Decode UTF-8 with ``errors="replace"``.
         2. Delegate to :func:`normalize_str` for the remaining steps
-           (strip invisible chars, lowercase, collapse whitespace).
+           (strip invisible/PUA chars, lowercase, collapse whitespace).
     """
     decoded = raw_bytes.decode("utf-8", errors="replace")
     return normalize_str(decoded)
@@ -589,30 +831,369 @@ def _downgrade_severity(severity: Severity, ceiling: Severity) -> Severity:
     return severity
 
 
-def _parse_extracted_lines(target_text: str) -> tuple[list[int], str]:
-    """Parse ``[L{line}]`` prefixes from extracted comment/string text.
+def _is_build_config_file(file: DiscoveredFile) -> bool:
+    """Return ``True`` for a build manifest (e.g. ``package.json``)."""
+    return file.path.name.lower() in BUILD_CONFIG_FILENAMES
 
-    Returns a tuple of ``(original_line_numbers, clean_text)`` where
-    ``original_line_numbers[i]`` is the source line number for the
-    ``i``-th fragment line (1-based index) and ``clean_text`` has all
-    ``[L{line}]`` prefixes stripped.
 
-    When a line does not start with ``[L{line}]`` (e.g. L009 fallback
-    where full content is returned), the fragment index itself is used
-    as the line number — which matches the original file lines.
+def _destructive_target_is_dangerous(line: str, match_end: int) -> bool:
+    """Return ``True`` when a destructive command targets a dangerous path.
+
+    Inspects the text following the matched command (e.g. ``rm -rf``) for the
+    filesystem root, a root wildcard, the home directory, a system directory, or
+    a parent-directory reference. Only a benign, relative target may be capped.
+    """
+    return bool(_DANGEROUS_DEST_TARGET_RE.search(line[match_end : match_end + 80]))
+
+
+def _url_hosts(text: str) -> list[str]:
+    """Return the lower-cased hosts of every URL in ``text``.
+
+    Userinfo and port are stripped: ``user:pw@Host:443`` → ``host``. All URLs
+    matter — severity decisions must not be maskable by placing a trusted URL
+    in front of the real destination.
+    """
+    hosts: list[str] = []
+    for match in _URL_HOST_RE.finditer(text):
+        host = match.group(1).lower()
+        host = host.rsplit("@", 1)[-1]
+        hosts.append(host.split(":", 1)[0])
+    return hosts
+
+
+def _looks_like_negated_privilege(line: str, start: int) -> bool:
+    """Return ``True`` when the text before ``start`` is a prohibition.
+
+    Suppresses IPI410 on advice *against* a privileged action ("do not use
+    sudo", "never run sudo"), which is the opposite of privilege escalation
+    (FP-10). The prohibition must sit immediately before the command.
+    """
+    prefix = line[max(0, start - 40) : start]
+    return bool(_NEGATED_PRIVILEGE_RE.search(prefix))
+
+
+def _parse_extracted_lines(target_text: str) -> tuple[list[int], list[bool], str]:
+    """Parse ``[L{line}]`` / ``[L{line}] [DOC|STR]`` prefixes from extracted text.
+
+    Returns a tuple ``(original_line_numbers, example_flags, clean_text)``
+    where:
+
+    * ``original_line_numbers[i]`` is the source line number for the ``i``-th
+      fragment line (1-based index),
+    * ``example_flags[i]`` is ``True`` when the ``i``-th fragment line
+      originates from a source-code string literal — a docstring (``[DOC]``)
+      or any other string value (``[STR]``) — and therefore belongs to an
+      example region, and
+    * ``clean_text`` has all ``[L{line}]`` / ``[DOC]`` / ``[STR]`` prefixes
+      stripped.
+
+    When a line does not start with ``[L{line}]`` (defensive: non-protocol
+    input such as the Pygments-unavailable fallback), the fragment index
+    itself is used as the line number and the line is never treated as an
+    example region — unlabelled input fails closed.
     """
     raw_lines = target_text.split("\n")
     line_numbers: list[int] = []
+    example_flags: list[bool] = []
     clean_lines: list[str] = []
     for i, line in enumerate(raw_lines, start=1):
         m = _EXTRACTED_LINE_RE.match(line)
         if m:
             line_numbers.append(int(m.group(1)))
+            example_flags.append(m.group("example") is not None)
             clean_lines.append(line[m.end():])
         else:
             line_numbers.append(i)
+            example_flags.append(False)
             clean_lines.append(line)
-    return line_numbers, "\n".join(clean_lines)
+    return line_numbers, example_flags, "\n".join(clean_lines)
+
+
+# ---------------------------------------------------------------------------
+# Example-region detection (FP-5 / FP-11)
+# ---------------------------------------------------------------------------
+#
+# Attack *examples* quoted in documentation (fenced code blocks, markdown
+# tables, inline ``code`` spans) and in source-code string literals (string
+# values and docstrings) are not live instructions. A ``PatternFinding`` that
+# begins inside such an "example region" is capped at
+# :data:`EXAMPLE_REGION_SEVERITY_CEILING`, so a quoted example can never
+# produce a CRITICAL/BLOCK verdict on its own.
+#
+# The machinery is deliberately conservative — a region must be *explicit*
+# (a code fence, a table, an inline-code span, a string literal / docstring,
+# or a list introduced by an "examples: / например: / payload:" cue). Content
+# outside these regions — notably source-code *comments*, where a live
+# injection actually hides — is matched at full severity, so a real injection
+# keeps its CRITICAL rating (recall is preserved). Two scope restrictions
+# close the wrap-the-payload evasion paths: fences are not example regions in
+# agent-instruction files (the whole file is the instruction channel), and
+# markdown framing never applies to extracted source-code content (only the
+# extractor's [DOC]/[STR] tags do — a comment cannot frame itself with
+# backticks, a fake fence or a fake table).
+
+#: Severity ceiling applied to findings inside an example region.
+EXAMPLE_REGION_SEVERITY_CEILING: Severity = Severity.MEDIUM
+
+#: Opening/closing fence of a fenced code block (``` or ~~~), with at most
+#: three leading spaces (CommonMark §4.5: four spaces make an indented code
+#: block, not a fence). The trailing ``(.*)`` captures the info string; a
+#: *backtick* fence whose info string contains a backtick (`` ```x``` ``) is
+#: prose, not a fence — this is enforced by the caller, not the regex.
+_FENCE_RE: re.Pattern[str] = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
+
+#: A markdown list item ("- ", "* ", "+ ", "1. ", "1) ").
+_LIST_ITEM_RE: re.Pattern[str] = re.compile(r"^\s*(?:[-*+]\s+|\d+[.)]\s+)")
+
+#: A run of one or more backticks (used to pair inline-code delimiters).
+_BACKTICK_RUN_RE: re.Pattern[str] = re.compile(r"`+")
+
+#: Cue phrases that introduce a quoted example. Deliberately label-like
+#: (":", "such as", "for example", …) so that ordinary prose containing the
+#: bare word "example" (e.g. a URL host ``example.com``) is not treated as a
+#: cue. Non-English cues follow the same rule: they must be a label
+#: ("пример:", "quote:") or a phrase that *introduces* an example
+#: ("например", "例如"). Multilingual: RU and CN.
+_EXAMPLE_CUE_RE: re.Pattern[str] = re.compile(
+    r"(?:"
+    r"\be\.g\.?"
+    r"|\bfor example\b|\bfor instance\b|\bsuch as\b"
+    r"|\bexamples?\b[^:：\n]{0,40}[:：]"
+    r"|\battack examples?\b|\bexample attacks?\b"
+    r"|\bpayloads?\s*[:：]"
+    r"|\bquotes?\s*[:：]"
+    r"|\bнапример\b|\bпример(?:ы)?\b[^:：\n]{0,40}[:：]"
+    r"|\bобразец(?:ы)?\s*[:：]|\bцитат(?:а|ы)?\s*[:：]|\bпейлоад\s*[:：]"
+    r"|示例|例如|例子|载荷\s*[:：]"
+    r")"
+)
+
+#: The *label-like* subset of the cues above — a colon-terminated label
+#: (``examples:``, ``payload:``, ``пример:``). A label cue marks its whole
+#: line as an example region; a bare phrase cue ("for example, …", "such as")
+#: only introduces the list that *follows* — marking the phrase-cue line
+#: itself would let an attacker cap a live instruction at ``MEDIUM`` simply by
+#: prefixing it with "for example,".
+_EXAMPLE_CUE_LABEL_RE: re.Pattern[str] = re.compile(
+    r"(?:"
+    r"\bexamples?\b[^:：\n]{0,40}[:：]"
+    r"|\bpayloads?\s*[:：]"
+    r"|\bquotes?\s*[:：]"
+    r"|\bнапример\s*[:：]|\bпример(?:ы)?\b[^:：\n]{0,40}[:：]"
+    r"|\bобразец(?:ы)?\s*[:：]|\bцитат(?:а|ы)?\s*[:：]|\bпейлоад\s*[:：]"
+    r"|载荷\s*[:：]"
+    r")"
+)
+
+
+def _is_table_delimiter(line: str) -> bool:
+    """Return ``True`` for a markdown table delimiter row (``| --- | --- |``).
+
+    Implemented without a regex (a simple character-set check) to avoid any
+    ReDoS exposure on adversarial input: the stripped line must contain both
+    a pipe and a dash, and consist only of ``|``, ``-``, ``:`` and spaces.
+    """
+    stripped = line.strip()
+    return "|" in stripped and "-" in stripped and all(c in "|-: " for c in stripped)
+
+
+def _inline_code_spans(line: str) -> list[tuple[int, int]]:
+    """Return ``(start, end)`` spans of inline-code delimiters in ``line``.
+
+    A span covers the opening backtick run through the matching closing run
+    of *equal length* (CommonMark's rule), so ``a `b` c`` yields the span
+    around ``b``. Unpaired runs are ignored.
+    """
+    spans: list[tuple[int, int]] = []
+    runs = list(_BACKTICK_RUN_RE.finditer(line))
+    index = 0
+    while index + 1 < len(runs):
+        opening, closing = runs[index], runs[index + 1]
+        if len(opening.group(0)) == len(closing.group(0)):
+            spans.append((opening.start(), closing.end()))
+            index += 2
+        else:
+            index += 1
+    return spans
+
+
+def _mark_cued_list(lines: list[str], block: list[bool], start: int) -> int:
+    """Mark the list/indented lines that follow an example cue.
+
+    Starting at ``start + 1`` (the line after the cue), mark contiguous list
+    items and indented continuation lines — together with any blank lines
+    that separate them — as example regions. Returns the index of the first
+    line *not* absorbed, so the caller can resume scanning there.
+    """
+    total = len(lines)
+    index = start + 1
+    pending_blanks = 0
+    while index < total:
+        line = lines[index]
+        if not line.strip():
+            pending_blanks += 1
+            index += 1
+            continue
+        if _LIST_ITEM_RE.match(line) or line.startswith(" "):
+            for blank_index in range(index - pending_blanks, index + 1):
+                block[blank_index] = True
+            pending_blanks = 0
+            index += 1
+            continue
+        break
+    return index
+
+
+def _is_valid_fence_open(match: re.Match[str]) -> bool:
+    """Return ``True`` when a ``_FENCE_RE`` match may open a code fence.
+
+    CommonMark §4.5: the info string of a *backtick* fence must not contain
+    backticks — `` ```ignore … ``` `` on one line is an ordinary paragraph, not
+    a fence. A tilde fence's info string may contain anything (including
+    backticks and tildes).
+    """
+    return match.group(1)[0] == "~" or "`" not in match.group(2)
+
+
+def _is_valid_fence_closer(
+    match: re.Match[str], fence_char: str, run_length: int
+) -> bool:
+    """Return ``True`` when a ``_FENCE_RE`` match closes the given fence.
+
+    A closing fence uses the same character, a run at least as long as the
+    opener's, and nothing but spaces after the run (CommonMark §4.5).
+    """
+    return (
+        match.group(1)[0] == fence_char
+        and len(match.group(1)) >= run_length
+        and not match.group(2).strip()
+    )
+
+
+def _detect_example_regions(
+    lines: list[str],
+    source_example_flags: list[bool] | None = None,
+    *,
+    fences_are_examples: bool = True,
+    markdown_regions: bool = True,
+) -> tuple[list[bool], list[list[tuple[int, int]]]]:
+    """Classify every line of ``lines`` as inside / outside an example region.
+
+    Returns ``(block_flags, inline_spans)`` where ``block_flags[i]`` marks a
+    whole line that lies inside a block example region (fenced code, markdown
+    table, cued example list, or a source-code string literal) and
+    ``inline_spans[i]`` lists the column spans of inline-code fragments on
+    line ``i``.
+
+    ``source_example_flags`` (from :func:`_parse_extracted_lines`) marks
+    fragment lines that came from a source-code string literal.
+
+    ``fences_are_examples`` disables the fenced-code-block pass. A fence is
+    monospace *formatting*, not a quotation: an agent-instruction file
+    (``AGENTS.md``, ``.cursorrules``, …) is itself the live instruction
+    channel, so content the author fenced there is still addressed to the
+    agent — wrapping a payload in ```` ``` ```` must not cap its severity
+    (see :func:`match_patterns`).
+
+    ``markdown_regions`` disables **all** markdown-derived passes (fences,
+    tables, cue lists, inline-code spans), leaving only the
+    ``source_example_flags`` marks. It is used for extracted source-code
+    content, where the extractor has already classified every line: string
+    literals carry their ``[DOC]``/``[STR]`` tag (their example-region mark),
+    while comment lines must never be capped — a payload between backticks in
+    a comment is prose styling, not a quotation (ADR-007: "comments are not
+    example regions"), and a block-comment body could otherwise forge fences
+    or tables around its own text.
+    """
+    total = len(lines)
+    block_flags = [False] * total
+    inline_spans: list[list[tuple[int, int]]] = [[] for _ in lines]
+
+    # Source-code string literals (strings / docstrings) are example regions
+    # by construction — they are data, not instructions (FP-11).
+    if source_example_flags:
+        for index in range(min(total, len(source_example_flags))):
+            if source_example_flags[index]:
+                block_flags[index] = True
+
+    if not markdown_regions:
+        return block_flags, inline_spans
+
+    # 1. Fenced code blocks (``` / ~~~) — unless suppressed for files where a
+    #    fence is not a quotation marker (agent-instruction files). A single
+    #    O(n) pass: each fence is marked tentatively and committed only when it
+    #    actually closes. An *unclosed* fence commits nothing — absorbing the
+    #    rest of the file would let an attacker cap every remaining finding at
+    #    MEDIUM simply by deleting the closing fence line (and per CommonMark
+    #    an unclosed fence's content is literal, with no inner fences of its
+    #    own).
+    if fences_are_examples:
+        tentative_start: int | None = None
+        tentative_char = ""
+        tentative_run = 0
+        for index, line in enumerate(lines):
+            match = _FENCE_RE.match(line)
+            if tentative_start is None:
+                if match is not None and _is_valid_fence_open(match):
+                    tentative_start = index
+                    tentative_char = match.group(1)[0]
+                    tentative_run = len(match.group(1))
+                continue
+            if match is not None and _is_valid_fence_closer(
+                match, tentative_char, tentative_run
+            ):
+                for fence_line in range(tentative_start, index + 1):
+                    block_flags[fence_line] = True
+                tentative_start = None
+        # An opener still pending at EOF never closed: its lines stay unmarked.
+
+    # 2. Markdown tables: a delimiter row plus the header above and the
+    #    contiguous body rows below (any line containing a pipe).
+    index = 0
+    while index < total:
+        if _is_table_delimiter(lines[index]):
+            header = index - 1
+            if header >= 0 and "|" in lines[header]:
+                block_flags[header] = True
+            body = index
+            while body < total and "|" in lines[body]:
+                block_flags[body] = True
+                body += 1
+            index = body
+        else:
+            index += 1
+
+    # 3. Example-cue lists ("examples:", "например:", "payload:", "such as", …).
+    #    A label cue (or a cue on a list-item line) marks the whole cue line;
+    #    a bare *phrase* cue marks only the list items that follow, so a live
+    #    instruction sharing the phrase-cue line keeps its full severity.
+    index = 0
+    while index < total:
+        if _EXAMPLE_CUE_RE.search(lines[index]):
+            if _EXAMPLE_CUE_LABEL_RE.search(lines[index]) or _LIST_ITEM_RE.match(
+                lines[index]
+            ):
+                block_flags[index] = True
+            index = _mark_cued_list(lines, block_flags, index)
+        else:
+            index += 1
+
+    # 4. Inline-code spans (per line, column-precise).
+    inline_spans = [_inline_code_spans(line) for line in lines]
+
+    return block_flags, inline_spans
+
+
+def _column_in_spans(spans: list[tuple[int, int]], column: int) -> bool:
+    """Return ``True`` when ``column`` falls inside any ``(start, end)`` span."""
+    return any(start <= column < end for start, end in spans)
+
+
+def _spans_overlap(a: tuple[int, int, int], b: tuple[int, int, int]) -> bool:
+    """Return ``True`` when two ``(line, start, end)`` spans intersect."""
+    if a[0] != b[0]:
+        return False
+    return not (a[2] <= b[1] or a[1] >= b[2])
 
 
 def match_patterns(
@@ -634,17 +1215,46 @@ def match_patterns(
     the original source line numbers are recovered and used in findings
     instead of the fragment indices.
 
-    Severity downgrade rule: if the file is a Markdown file (``.md``)
-    that is *not* categorised as an agent instruction document, the
-    severity for every finding is capped at :data:`Severity.MEDIUM`.
+    Severity downgrade rules:
+
+    * if the file is a Markdown file (``.md``) that is *not* categorised
+      as an agent instruction document, the severity for every finding is
+      capped at :data:`Severity.MEDIUM`;
+    * additionally, any finding that begins inside an **example region** —
+      a markdown table, an inline-code span, a source code string literal
+      (``[STR]``) or docstring (``[DOC]``), or a list introduced by an
+      "examples: / например: / payload:" cue — is capped at
+      :data:`EXAMPLE_REGION_SEVERITY_CEILING`. This keeps quoted attack
+      examples from blocking a scan without weakening detection of real
+      injections outside those regions (notably source-code comments).
+      Two scope restrictions close evasion paths:
+      **fenced code blocks are exempt in agent-instruction files**
+      (:class:`~ipi_check.core.types.FileCategory.AGENT_INSTRUCTION`): such a
+      file *is* the live instruction channel, and a fence there is monospace
+      formatting, not a quotation — a CRITICAL payload wrapped in a fence in
+      ``AGENTS.md`` / ``.cursorrules`` must keep its severity so the
+      deterministic BLOCK (invariant I002) cannot be bypassed by
+      fence-wrapping; and **markdown framing never applies to extracted
+      source-code content** — there, the extractor's ``[DOC]``/``[STR]``
+      tags are the only example-region marks, so a comment line can never
+      cap itself by embedding backticks, a fake fence or a fake table
+      (comments are not example regions, ADR-007);
+    * finally, ``DEST_002`` (``rm -rf``) inside a build manifest
+      (:data:`BUILD_CONFIG_FILENAMES`, e.g. ``package.json``) is capped at
+      :data:`DEST_002_BUILD_CONTEXT_SEVERITY` when its target is benign
+      (relative build output) — a dangerous target (filesystem root, ``~``,
+      a system directory, ``..``) stays ``CRITICAL`` (FP-5).
     """
     if file.category == FileCategory.SKILL:
         return []
 
     line_numbers: list[int] | None = None
+    source_example_flags: list[bool] | None = None
 
     if target_text is not None:
-        line_numbers, clean_text = _parse_extracted_lines(target_text)
+        line_numbers, source_example_flags, clean_text = _parse_extracted_lines(
+            target_text
+        )
         normalized = normalize_str(clean_text)
     else:
         normalized = normalize_text(raw_bytes)
@@ -655,14 +1265,33 @@ def match_patterns(
         file.category != FileCategory.AGENT_INSTRUCTION
         and file.path.suffix.lower() == ".md"
     )
+    is_build_config = _is_build_config_file(file)
 
     findings: list[PatternFinding] = []
     lines = normalized.split("\n")
+    example_block, example_inline = _detect_example_regions(
+        lines,
+        source_example_flags,
+        # An agent-instruction file is itself the instruction channel: a
+        # fenced block there is content the agent reads and follows, not a
+        # quoted example, so fences must not cap severity in that category.
+        fences_are_examples=file.category != FileCategory.AGENT_INSTRUCTION,
+        # Markdown framing (fences, tables, inline-code spans, cue lists)
+        # applies only to text the agent reads as prose. Extracted
+        # source-code content is already comment/string-classified by the
+        # extractor: string lines carry their [DOC]/[STR] example-region tag,
+        # and comment lines must never be capped — backticks or a forged
+        # fence/table inside a comment are attacker-authored framing, not a
+        # quotation (ADR-007: comments are not example regions).
+        markdown_regions=target_text is None,
+    )
 
     for line_index, line in enumerate(lines, start=1):
         if not line:
             continue
         actual_line = line_numbers[line_index - 1] if line_numbers else line_index
+        line_block_region = example_block[line_index - 1]
+        line_inline_spans = example_inline[line_index - 1]
         for pattern_id, compiled, category, base_severity in _COMPILED_PATTERNS:
             try:
                 matches = list(compiled.finditer(line, timeout=REGEX_TIMEOUT_SECONDS))
@@ -670,11 +1299,38 @@ def match_patterns(
                 # Regex timed out — skip this pattern on this line (ReDoS protection).
                 continue
             for match in matches:
-                severity = (
-                    _downgrade_severity(base_severity, Severity.MEDIUM)
-                    if is_non_agent_markdown
-                    else base_severity
+                in_example_region = line_block_region or _column_in_spans(
+                    line_inline_spans, match.start()
                 )
+                framed = False
+                if is_non_agent_markdown or in_example_region:
+                    severity = _downgrade_severity(
+                        base_severity, EXAMPLE_REGION_SEVERITY_CEILING
+                    )
+                    # In an agent-instruction file the framing (a cue list, a
+                    # table row, an inline-code span) is attacker-writable in
+                    # exactly the same way the prose is, so the cap cannot be
+                    # trusted to mean "quotation": mark the finding so
+                    # confidence fusion floors the file's verdict at
+                    # REVIEW_REQUIRED — a framed payload in the instruction
+                    # channel must never fuse to a silent PASS, while benign
+                    # quoted examples stay below BLOCK (FP-5 corpus).
+                    framed = in_example_region and (
+                        file.category == FileCategory.AGENT_INSTRUCTION
+                    )
+                else:
+                    severity = base_severity
+                # DEST_002 ("rm -rf …") in a build manifest cleans *relative*
+                # build output — cap at MEDIUM unless the target is dangerous
+                # (filesystem root, home, a system directory) — FP-5 / T1.2.
+                if (
+                    pattern_id == "DEST_002"
+                    and is_build_config
+                    and not _destructive_target_is_dangerous(line, match.end())
+                ):
+                    severity = _downgrade_severity(
+                        severity, DEST_002_BUILD_CONTEXT_SEVERITY
+                    )
                 findings.append(
                     PatternFinding(
                         category=category,
@@ -684,9 +1340,57 @@ def match_patterns(
                         matched_text=_truncate(match.group(0)),
                         pattern_id=pattern_id,
                         description=_CATEGORY_DESCRIPTIONS[category],
+                        framed=framed,
                     )
                 )
 
+    return findings
+
+
+def _external_transmission_severity(line: str, base: Severity) -> Severity:
+    """Refine an IPI403 severity from *every* destination host on the line.
+
+    Classification is per-URL, so a trusted URL cannot mask an attacker URL
+    on the same line:
+
+    * any host matching :data:`_EXFIL_DOMAIN_RE` → ``CRITICAL``;
+    * *every* host allowlisted → :data:`EXTERNAL_TRANSMISSION_TRUSTED` (LOW);
+    * otherwise → the baseline (``MEDIUM``).
+    """
+    hosts = _url_hosts(line)
+    if not hosts:
+        return base
+    if any(_EXFIL_DOMAIN_RE.search(host) for host in hosts):
+        return Severity.CRITICAL
+    if all(host in TRUSTED_DOMAINS for host in hosts):
+        return EXTERNAL_TRANSMISSION_TRUSTED
+    return base
+
+
+def _corroborate_external_transmission(
+    findings: list[PatternFinding],
+    lines: list[str],
+) -> list[PatternFinding]:
+    """Escalate IPI403 to CRITICAL when the file also reads a credential.
+
+    A lone ``curl`` to an unclassified host is only suspicious (``MEDIUM``);
+    once the same file is seen to *read* a secret (IPI402), the transmission is
+    corroborated exfiltration → ``CRITICAL``. A transmission whose *every*
+    destination host is allowlisted is exempt, so a legitimate skill that
+    reads a token and calls a known API stays ``LOW`` — but a trusted URL on
+    the same line cannot mask an unclassified or attacker destination.
+    """
+    if not any(f.pattern_id == "IPI402" for f in findings):
+        return findings
+    for finding in findings:
+        if finding.pattern_id != "IPI403" or finding.severity == Severity.CRITICAL:
+            continue
+        hosts: list[str] = []
+        if 1 <= finding.line <= len(lines):
+            hosts = _url_hosts(lines[finding.line - 1])
+        if hosts and all(host in TRUSTED_DOMAINS for host in hosts):
+            continue
+        finding.severity = Severity.CRITICAL
     return findings
 
 
@@ -705,6 +1409,17 @@ def match_skill_patterns(
     When ``target_text`` is provided (e.g., pre-extracted comments and
     strings from source code), it is normalised via :func:`normalize_str`
     instead of decoding ``raw_bytes``.
+
+    Severity is refined from context rather than taken literally from the
+    pattern table:
+
+    * ``IPI403`` (external transmission) — ``LOW`` for a ``TRUSTED_DOMAINS``
+      host, ``CRITICAL`` for an ``_EXFIL_DOMAIN_RE`` host, otherwise the
+      ``EXTERNAL_TRANSMISSION_BASELINE``; escalated to ``CRITICAL`` when the
+      file also reads a credential (see :func:`_corroborate_external_transmission`);
+    * ``IPI410`` (privilege escalation) — a bare ``sudo`` is ``HIGH``, an
+      inherently destructive escalation is ``CRITICAL``, and a match preceded by
+      a prohibition ("do not use sudo") is dropped (FP-10).
     """
     if target_text is not None:
         normalized = normalize_str(target_text)
@@ -714,6 +1429,12 @@ def match_skill_patterns(
         return []
 
     findings: list[PatternFinding] = []
+    # Live match spans and corroborated flags, parallel to ``findings`` — used
+    # to de-duplicate IPI402: a corroborated read+transmit already reports the
+    # credential read, and the two corroboration directions (read→sink,
+    # sink→read) describe the same event when they overlap on a line.
+    match_spans: list[tuple[int, int, int]] = []
+    is_corroborated: list[bool] = []
     lines = normalized.split("\n")
 
     for line_index, line in enumerate(lines, start=1):
@@ -726,10 +1447,30 @@ def match_skill_patterns(
                 # Regex timed out — skip this pattern on this line (ReDoS protection).
                 continue
             for match in matches:
+                if (
+                    pattern_id in _NEGATION_GUARDED_PATTERN_IDS
+                    and _looks_like_negated_privilege(line, match.start())
+                ):
+                    # Advice *against* a privileged action is not escalation (FP-10).
+                    continue
+                severity = base_severity
+                corroborated_match = False
+                if pattern_id == "IPI403":
+                    severity = _external_transmission_severity(line, base_severity)
+                elif pattern_id == "IPI402" and severity == Severity.CRITICAL:
+                    # Corroborated read+transmit (see the pattern table): when
+                    # every destination host on the line is allowlisted, the
+                    # credential is being used with a known API, not
+                    # exfiltrated — refine to HIGH (FP-9), same as the HIGH
+                    # plain-credential-read pattern.
+                    hosts = _url_hosts(line)
+                    if hosts and all(host in TRUSTED_DOMAINS for host in hosts):
+                        severity = Severity.HIGH
+                    corroborated_match = True
                 findings.append(
                     PatternFinding(
                         category=category,
-                        severity=base_severity,
+                        severity=severity,
                         line=line_index,
                         column=match.start() + 1,
                         matched_text=_truncate(match.group(0)),
@@ -737,5 +1478,29 @@ def match_skill_patterns(
                         description=_SKILL_CATEGORY_DESCRIPTIONS[category],
                     )
                 )
+                match_spans.append((line_index, match.start(), match.end()))
+                is_corroborated.append(corroborated_match)
 
-    return findings
+    # One corroborated event per line region: keep the first corroborated
+    # match and drop overlapping corroborated duplicates plus the plain
+    # credential reads they already report.
+    keep = [True] * len(findings)
+    accepted_spans: list[tuple[int, int, int]] = []
+    for idx in range(len(findings)):
+        if not is_corroborated[idx]:
+            continue
+        if any(_spans_overlap(match_spans[idx], other) for other in accepted_spans):
+            keep[idx] = False
+        else:
+            accepted_spans.append(match_spans[idx])
+    for idx in range(len(findings)):
+        if (
+            keep[idx]
+            and not is_corroborated[idx]
+            and findings[idx].pattern_id == "IPI402"
+            and any(_spans_overlap(match_spans[idx], other) for other in accepted_spans)
+        ):
+            keep[idx] = False
+    findings = [f for f, k in zip(findings, keep, strict=True) if k]
+
+    return _corroborate_external_transmission(findings, lines)

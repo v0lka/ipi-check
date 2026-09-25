@@ -138,12 +138,13 @@ ipi-check scan REPO_PATH [OPTIONS]
 | ----------------------- | ------ | ------------ | --------------------------------------------------------------------------------- |
 | `REPO_PATH`             | path   | _(required)_ | Repository directory to scan. Supports `${VAR}` expansion.                        |
 | `--llm-base-url URL`    | string | `None`       | LiteLLM base URL (for self-hosted / proxy endpoints).                             |
-| `--llm-model NAME`      | string | `None`       | LLM model name, e.g. `gpt-4o-mini`, `claude-3-5-sonnet`. Omit to disable Stage 2. |
+| `--llm-model NAME`      | string | `None`       | LLM model name, e.g. `gpt-4o-mini`, `claude-3-5-sonnet`. Falls back to `IPI_CHECK_LLM_MODEL`. Required (together with an API key) to enable Stage 2 — LiteLLM has no default model. |
 | `--llm-api-token TOKEN` | string | `None`       | API token for the LLM provider. Supports `${VAR}` expansion.                      |
 | `--output PATH`         | path   | stdout       | Write SARIF to a file (compact JSON). Warns if extension is not `.sarif`.         |
 | `--quiet`               | flag   | `false`      | Suppress banner, progress, and summary lines on stderr.                           |
 | `--no-gitignore`        | flag   | `false`      | Disable `.gitignore`-aware file exclusion.                                        |
 | `--exclude PAT`         | string | _(none)_     | Glob pattern to exclude (gitignore syntax). Repeatable.                           |
+| `--fail-on POLICY`      | enum   | `none`       | Exit-code policy: `none` always exits `0` on a completed scan; `block` exits `3` on any BLOCK verdict; `review` exits `3` on BLOCK and `4` when only REVIEW_REQUIRED verdicts are present. See [Exit Codes](#exit-codes). |
 | `--version`             | flag   | —            | Print version and exit.                                                           |
 | `-h`, `--help`          | flag   | —            | Show help and exit.                                                               |
 
@@ -156,9 +157,14 @@ ipi-check scan REPO_PATH [OPTIONS]
 | `0`  | Scan completed successfully. SARIF emitted. Findings (if any) are in SARIF. |
 | `1`  | Runtime error (I/O failure, pipeline crash, etc.). See stderr.              |
 | `2`  | Usage error (invalid path, missing argument, bad output directory).         |
+| `3`  | `--fail-on block` or `review` policy tripped by a **BLOCK** verdict.         |
+| `4`  | `--fail-on review` tripped by a **REVIEW_REQUIRED** verdict (no BLOCK).      |
 
-`ipi-check` always exits `0` on a clean scan regardless of verdicts —
-the SARIF report carries the findings, leaving gating decisions to your CI.
+With the default policy (`--fail-on none`) `ipi-check` always exits `0` on a
+clean scan regardless of verdicts — the SARIF report carries the findings,
+leaving gating decisions to your CI. Pass `--fail-on block` (or `review`) to
+opt into non-zero exit codes for CI gates that prefer them; the emitted SARIF
+is identical under every policy.
 
 ---
 
@@ -233,9 +239,11 @@ confidence, the LLM verdict (when present), and a human-readable message.
 
 ## Local Git Hook (blocking `post-checkout`)
 
-`ipi-check` itself always exits `0` so its SARIF can be consumed by CI gates.
-For local development you can wrap it in a small bash script that parses the
-verdict summary and exits non-zero on `BLOCK`. The wrapper is shipped at
+`ipi-check` itself always exits `0` under the default `--fail-on none` policy,
+so its SARIF can be consumed by CI gates. For local development the shipped
+wrapper runs the scan with an explicit `--fail-on` policy and maps the
+scanner's **exit code** (`3` BLOCK / `4` REVIEW_REQUIRED) to the hook status —
+it never parses the human-readable stderr summary. The wrapper is shipped at
 [`scripts/ipi-check-hook.sh`](./scripts/ipi-check-hook.sh) and is suitable for
 any client-side hook (`post-checkout`, `post-merge`, `post-rewrite`,
 `pre-commit`, …).
@@ -295,7 +303,14 @@ The wrapper honours a few environment variables:
 | --------------------------- | ----------- | ----------------------------------------------------------------- |
 | `IPI_CHECK_HOOK_DISABLE`    | `0`         | Set to `1` to skip the scan entirely (one-shot opt-out).          |
 | `IPI_CHECK_BLOCK_ON_REVIEW` | `0`         | Set to `1` to also fail when `REVIEW_REQUIRED > 0`.               |
+| `IPI_CHECK_FAIL_ON`         | —           | Explicit `--fail-on` value (`none`/`block`/`review`); overrides the shortcut above. |
 | `IPI_CHECK_BIN`             | `ipi-check` | Override the binary path, e.g. to a virtualenv or pinned version. |
+
+The hook invokes `ipi-check scan` without LLM flags, so hook runs are
+static-only by default. To enable LLM classification for them, export an API
+key (`OPENAI_API_KEY` / `LITELLM_API_KEY` / `ANTHROPIC_API_KEY`) **and**
+`IPI_CHECK_LLM_MODEL` — the hook cannot pass `--llm-model`, and a key without a
+model leaves the scan static-only (reported on stderr).
 
 Example — temporarily bypass the hook for one checkout:
 
@@ -364,14 +379,33 @@ ipi-check:
 
 ## Docker Usage
 
-Mount the repository to scan as a volume and let the container produce SARIF
-on stdout:
+The image bundles the scanner together with its LLM client
+([LiteLLM](https://github.com/BerriAI/litellm)), so the optional `--llm-*`
+classifier works with no extra install. Mount the repository to scan as a
+volume — `/repo` is the image's working directory.
+
+### Static scan (no LLM)
 
 ```bash
 docker run --rm -v "$(pwd):/repo" ipi-check scan /repo
 ```
 
-Persist the report and pass an API token via environment variable:
+Add `--output` to persist the report inside the mounted volume:
+
+```bash
+docker run --rm -v "$(pwd):/repo" ipi-check scan /repo --output /repo/results.sarif
+```
+
+### Scan with LLM classification
+
+The classifier is enabled when a credential **and** a model are both
+available — the credential via `--llm-api-token` or one of the provider
+environment variables (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`,
+`LITELLM_API_KEY`) forwarded with `-e`, and the model via `--llm-model` or
+`IPI_CHECK_LLM_MODEL`. Passing either half alone leaves the scan static-only
+(exit 0, with a stderr warning naming what is missing).
+
+OpenAI (or any LiteLLM-native provider) using an environment variable:
 
 ```bash
 docker run --rm \
@@ -382,6 +416,36 @@ docker run --rm \
   --llm-api-token '${OPENAI_API_KEY}' \
   --output /repo/results.sarif
 ```
+
+Every string argument supports `${VAR}` expansion, so `--llm-api-token` can be
+fed from the container environment without the credential appearing literally
+on the command line.
+
+### Self-hosted / proxy endpoints (`--llm-base-url`)
+
+Point `--llm-base-url` at any OpenAI-compatible endpoint — a LiteLLM proxy,
+Ollama, vLLM, Azure OpenAI, … — and prefix the model with its provider when
+LiteLLM needs the hint (`openai/…`, `ollama/…`, `azure/…`):
+
+```bash
+docker run --rm \
+  -v "$(pwd):/repo" \
+  -e LITELLM_API_KEY \
+  ipi-check scan /repo \
+  --llm-base-url 'http://host.docker.internal:4000/v1' \
+  --llm-model 'openai/gpt-4o-mini' \
+  --llm-api-token '${LITELLM_API_KEY}' \
+  --output /repo/results.sarif
+```
+
+When the endpoint runs on the Docker host, reach it from the container with
+`host.docker.internal` (Docker Desktop resolves this automatically; on Linux
+pass `--add-host=host.docker.internal:host-gateway`) or, on Linux, with
+`--network host` and `http://127.0.0.1:…`.
+
+`--format` selects the report shape: the examples above emit the default
+SARIF v2.1.0, while `--format md`, `--format table` and `--format json`
+produce human-readable or flat-JSON reports instead.
 
 ---
 

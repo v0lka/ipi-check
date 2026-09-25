@@ -12,6 +12,7 @@ dependencies = [
     "litellm>=1.0",
     "pathspec>=0.12",
     "pygments>=2.17",
+    "pyyaml>=6.0",
     "regex>=2024.0",
 ]
 
@@ -45,6 +46,14 @@ python_version = "3.12"
 strict = true
 warn_return_any = true
 warn_unused_configs = true
+
+# PyYAML ships no type information (no ``py.typed`` marker). Treat it as an
+# untyped import rather than failing strict mode; the frontmatter parser
+# isolates every PyYAML call behind ``_yaml_load_mapping`` and normalises the
+# untyped result immediately.
+[[tool.mypy.overrides]]
+module = ["yaml"]
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

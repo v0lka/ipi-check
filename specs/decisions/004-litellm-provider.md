@@ -20,7 +20,11 @@ Building and maintaining separate integrations for each provider is unsustainabl
 
 LiteLLM provides a unified interface (`litellm.completion()`) across 100+ LLM providers using a consistent OpenAI-compatible API format. The scanner invokes `litellm.completion(model=..., messages=[...], temperature=0.3)` and LiteLLM handles provider routing, authentication, and response parsing.
 
-Configuration is passed via CLI arguments (`--llm-base-url`, `--llm-model`, `--llm-api-token`) which map to LiteLLM's configuration model. If arguments are not provided, LiteLLM falls back to its default behavior (environment variables, config files).
+Configuration is passed via CLI arguments (`--llm-base-url`, `--llm-model`, `--llm-api-token`) which map to LiteLLM's configuration model.
+
+> **Amendment — the model is not optional.** This ADR originally stated that, absent `--llm-model`, "LiteLLM falls back to its default behavior (environment variables, config files)". It does not: `litellm.completion()` takes `model` as a **required** argument, so a credential without a model raised `TypeError: completion() missing 1 required positional argument: 'model'` on *every* file — surfacing as `IPI900` (compromised) plus a static-only fallback, i.e. a one-line configuration mistake became per-file noise.
+>
+> LLM availability therefore requires **both** halves of a usable request: an API credential (`--llm-api-token`, or `LITELLM_API_KEY` / `OPENAI_API_KEY` / `ANTHROPIC_API_KEY`) **and** a model (`--llm-model`, or the `IPI_CHECK_LLM_MODEL` env fallback for callers that cannot pass arguments — the git hook, a prebuilt CI image). When the model is missing the LLM phase is refused up front: the scan stays static-only with exit code 0 and stderr names the fix. `--llm-base-url` and `--llm-api-token` remain genuinely optional.
 
 ## Alternatives Considered
 
