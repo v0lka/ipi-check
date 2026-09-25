@@ -59,9 +59,10 @@ ignore_missing_imports = true
 testpaths = ["tests"]
 
 [tool.uv]
-# Security floor for transitive dependencies. `aiohttp` (pulled in via
-# `litellm`) is resolved through the lockfile; versions below 3.14.3 carry
-# known vulnerabilities reported by `pip-audit`. The constraint keeps the
-# locked resolution at or above the first fixed release so the CI
+# Security floor for transitive dependencies. `aiohttp` and `anyio`
+# (pulled in via `litellm`) are resolved through the lockfile; versions below
+# these floors carry known vulnerabilities reported by `pip-audit` (anyio:
+# CVE-2026-63374 and CVE-2026-64847, fixed in 4.14.2). The constraints keep
+# the locked resolution at or above the first fixed release so the CI
 # dependency scan (see .github/workflows/ci.yml) stays green.
-constraint-dependencies = ["aiohttp>=3.14.3"]
+constraint-dependencies = ["aiohttp>=3.14.3", "anyio>=4.14.2"]
